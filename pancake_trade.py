@@ -1,394 +1,481 @@
-import json
-from time import time
-from typing import Tuple, List, Optional
-
-import aiohttp
-from web3 import AsyncWeb3, AsyncHTTPProvider, Web3
-from eth_account import Account
-
 import asyncio
-from decimal import Decimal, getcontext
+import time
+import ccxt.async_support as ccxt
+from aiogram.client.session import aiohttp
+from eth_account import Account
+from web3.exceptions import ContractLogicError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pancake_trade import OkxTrade
+from web3 import AsyncWeb3
+
+from exchange import place_limit_order, get_session
 from config import RPC_BSC
+USDC_CONTRACTS = {
+    'BEP20': '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'
+}
 
+USDC_CONTRACTS_2 = {
+    56: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'
+}
 
-# Сессия с connection pool и таймаутами
-_session: Optional[aiohttp.ClientSession] = None
-_session_lock = asyncio.Lock()
+# Минимальный ABI для баланса ERC20
+ERC20_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function"
+    },
+    {
+            "constant": True,
+            "inputs": [
+                {"name": "owner", "type": "address"},
+                {"name": "spender", "type": "address"}
+            ],
+            "name": "allowance",
+            "outputs": [{"name": "", "type": "uint256"}],
+            "type": "function",
+            "stateMutability": "view"
+        },
+]
 
-class OkxTrade:
-    def __init__(self, pair, address, abi, dec2, rak, private_key):
+cached = {}
+class Arbitrage:
+    # def __init__(self, exchange, pair, pancakce, db, chat_id, bot, privat_key):
+    def __init__(self, exchange, pair, pancakce, privat_key):
+        self.exchange = exchange
         self.pair = pair
-        self.abi = abi
-        self.address = address
-        self.decimals_in = 18
-        self.decimals_out = dec2
-        self.private_key = private_key
-        self.rak = rak
-        self.ws_url = "wss://bnb-mainnet.g.alchemy.com/v2/HrpyTKu0jGPtMyZvD5iCV"
-        self.w3 = Web3(Web3.LegacyWebSocketProvider("wss://bnb-mainnet.g.alchemy.com/v2/HrpyTKu0jGPtMyZvD5iCV"))
-        self.rpc = AsyncWeb3(AsyncHTTPProvider(RPC_BSC))
-        self.account = self.rpc.eth.account.from_key(private_key)
-        self.from_addr = Web3.to_checksum_address(self.account.address)
-        self.router_addr = Web3.to_checksum_address("0x13f4EA83D0bd40E75C8222255bc855a974568Dd4")
-        with open('pancake_router_v2_abi.json', 'r') as f:
-            self.smart_router_abi = json.load(f)
-        self.router = self.rpc.eth.contract(address=self.router_addr, abi=self.smart_router_abi)
+        self.pancakce = pancakce
+        self.private_key = privat_key
 
-        with open('erc20_abi.json', 'r') as f:
-            self.erc20_abi = json.load(f)
-        self.WBNB = Web3.to_checksum_address("0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")
+        self.owner = Account.from_key(self.private_key).address
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_BSC))
+
+        self.running = True
+
+        self.balance_usdt_mexc = 400
+        self.balance_token_mexc = 120
+        self.balance_token_dex = 120
+        self.balance_usdc_dex_bsc = 400
 
 
+        self.Is_enough_balance_for_fee = True
 
+        self.usdc_contracts = {}
+        self._withdrawal_fee_cache = {}
+        self._cache_lock = asyncio.Lock()
 
-        self.buy = self.rak
-        self.sell = self.rak
+        self.PROFIT_THRESHOLD = 0.5
+        self.GLOBAL_SPREAD = 1
 
+        self.last_alert = {}
+        self.alert_cooldown = 300
+        self.min_profit_change = 1
 
-    async def get_session(self) -> aiohttp.ClientSession:
-        global _session
-        async with _session_lock:
-            if _session is None or _session.closed:
-                # Создаем коннектор с настройками прокси
-                connector = aiohttp.TCPConnector(
-                    limit=50,
-                    ttl_dns_cache=300,
-                )
+        self.addresses = {
+            'ERC20': None,
+            'BEP20': None,
+            'BASE': None
+        }
+        self.tes = self.pair.split('/')
+        self.symbol = f"{self.tes[0]}_{self.tes[1]}"
+        self._last_fee_update = 0
+        self._fee_lock = asyncio.Lock()
 
-                _session = aiohttp.ClientSession(
-                    connector=connector,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "Origin": "https://www.mexc.com",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                    },
-                    timeout=aiohttp.ClientTimeout(
-                        total=15,
-                        connect=6,
-                        sock_read=6
-                    ),
-                    trust_env=False
-                )
-        return _session
+        # for net, w3 in self.w3_providers.items():
+        #     w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+    def compute_prefix_stats_with_max_sum(self, order_book_levels, max_sum):
+        """Вычисляет кумулятивные суммы с учетом MAX_SUM, агрегируя ордера.
+        Возвращает:
+            - cum_amounts: список накопленных объемов
+            - cum_costs: список накопленных стоимостей
+            - avg_prices: список кортежей (средняя цена, цена текущего ордера)
+        """
+        prices, volumes = zip(*order_book_levels) if order_book_levels else ([], [])
+        cum_amounts, cum_costs, avg_prices = [], [], []
+        total_amount, total_cost = 0.0, 0.0
 
-    async def close_session(self):
-        global _session
-        async with _session_lock:
-            if _session and not _session.closed:
-                await _session.close()
+        for price, volume in zip(prices, volumes):
+            remaining = max(0, max_sum - total_cost)
+            if remaining <= 0:
+                break
 
-    async def side(self, pool):
-        token0 = pool.functions.token0().call()
-        token1 = pool.functions.token1().call()
-        if token1 == "0x55d398326f99059fF775485246999027B3197955":
-            return True
-        if token0 == "0x55d398326f99059fF775485246999027B3197955":
-            return False
-        else:
-            return None
+            available_volume = min(volume, remaining / price)
+            new_cost = total_cost + available_volume * price
 
-    async def sqrtPriceX96_to_price(self, sqrtPriceX96: int) -> Decimal:
-        sqrt_price = Decimal(sqrtPriceX96) / (Decimal(2) ** 96)
-        price = sqrt_price * sqrt_price
-        return price
+            # Корректировка объема, если сумма превышает max_sum
+            if new_cost > max_sum:
+                available_volume = (max_sum - total_cost) / price
+                new_cost = total_cost + available_volume * price
 
-    async def adjust_for_decimals(self, price, dec0: int, dec1: int) -> Decimal:
-        exp = dec0 - dec1
-        return price * (Decimal(10) ** exp)
+            # Обновляем итоговые значения
+            total_amount += available_volume
+            total_cost = new_cost
 
-    async def handle_event(self, e, side1):
-        args = e["args"]
-        amount0 = args['amount0']
-        amount1 = args['amount1']
-        sqrtPriceX96 = args["sqrtPriceX96"]
-        raw_price = await self.sqrtPriceX96_to_price(sqrtPriceX96)
-        price_corr = (await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out) if side1
-                      else 1 / await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out))
+            # Сохраняем среднюю цену и цену текущего ордера
+            avg_price = total_cost / total_amount if total_amount else price
+            avg_prices.append((avg_price, price))  # Кортеж из двух значений
 
-        if abs(float(price_corr) - self.rak) <= self.rak * 0.05:
-            if amount0 < 0:
-                self.rak = float(price_corr)
-                self.sell = float(price_corr)
-            if amount1 < 0:
-                self.rak = float(price_corr)
-                self.buy = float(price_corr)
+            cum_amounts.append(total_amount)
+            cum_costs.append(total_cost)
 
-    async def monitoring_price(self):
-        pool = self.w3.eth.contract(address=self.address, abi=self.abi)
-        swap_filter = pool.events.Swap.create_filter(from_block='latest')
-        side = await self.side(pool)
-        if side is None:
-            print("side1 is None, невозможна работа")
-            # можно либо завершить, либо подождать и пробовать снова
+            if total_cost >= max_sum:
+                break
+
+        return cum_amounts, cum_costs, avg_prices
+
+    async def send_notification(self, message: str):
+        # if self.bot and self.chat_id:
+        #     try:
+        #         await self.bot.send_message(self.chat_id, message)
+        #     except Exception as e:
+        #         print(f"Ошибка отправки уведомления: {e}")
+        print(f'SEND NOTIF: {message}')
+
+    async def send_opportunity_alert(self, opportunity):
+        """Отправляет сообщение об арбитражной возможности с кнопкой"""
+        if not self.bot or not self.chat_id:
+            print("Bot or chat_id not initialized. Cannot send message.")
             return
-        while True:
-            try:
-                events = swap_filter.get_new_entries()
-                for e in events:
-                    await self.handle_event(e, side)
-                await asyncio.sleep(0.01)
-            except Exception as exc:
-                print("Ошибка при получении новых записей:", exc)
+        chain = ''
+        decimal = 0
+        if int(opportunity['chain_id']) == 1:
+            decimal = self.okx_client.decimals[1]
+            chain = 'ETH'
+        if int(opportunity['chain_id']) == 8453:
+            decimal = self.okx_client.decimals[8453]
+            chain = 'BASE'
+        if int(opportunity['chain_id']) == 56:
+            decimal = self.okx_client.decimals[56]
+            chain = 'BSC'
+        # Форматируем сообщение
+        opp_type = opportunity['type']
+        volume = opportunity['volume']
+        chain_id = opportunity['chain_id']
+        mexc_price = opportunity['mexc_price']
+        okx_price = opportunity['okx_price']
+        profit = opportunity['profit']
+        spread = opportunity['spread']
+        price = opportunity['price']
+        # Определяем направление сделки
+        direction = "MEXC → OKX" if opp_type == 'BUY_MEXC' else "OKX → MEXC"
 
-    async def swap_universal_async(
-            self,
-            token_in: str,
-            token_out: str,
-            amount_in_human: float,
-            slippage: float = 0.05,
-            max_price_impact: float = 0.1,
-            min_profit_percent: float = 0.0,
-    ):
+        def format_price(p):
+            if float(p) == 0:
+                return "0"
+            # Для очень маленьких цен (< 0.0001)
+            if float(p) < 0.0001:
+                s = f"{p:.20f}"  # Преобразуем в строку с 20 знаками
+                s_clean = s.rstrip('0').rstrip('.')  # Убираем хвостовые нули
 
-        # загрузка ABI (блокирующая) — выполняем в отдельном потоке
-        with open('pancake_router_v2_abi.json', 'r') as f:
-            smart_router_abi = json.load(f)
-        with open('erc20_abi.json', 'r') as f:
-            erc20_abi = json.load(f)
-
-        router = self.rpc.eth.contract(address=self.router_addr, abi=smart_router_abi)
-        t = time()
-        token_in_addr = Web3.to_checksum_address(token_in)
-        token_out_addr = Web3.to_checksum_address(token_out)
-
-
-        amount_in = int(amount_in_human * (10 ** self.decimals_in))
-
-        token_in_contract = self.rpc.eth.contract(address=token_in_addr, abi=erc20_abi)
-
-        # --- nonce & allowance ---
-        nonce = await self.rpc.eth.get_transaction_count(self.from_addr)
-        allowance = await token_in_contract.functions.allowance(self.from_addr, self.router_addr).call()
-
-        if allowance < amount_in:
-            # build approve tx (build_transaction синхронный, но недолго)
-            tx = token_in_contract.functions.approve(self.router_addr, amount_in).build_transaction({
-                'from': self.from_addr,
-                'nonce': nonce,
-                'gasPrice': await self.rpc.eth.gas_price,
-            })
-            # sign in thread (blocking)
-            signed = await asyncio.to_thread(Account.sign_transaction, tx, self.private_key)
-            txh = await self.rpc.eth.send_raw_transaction(signed.raw_transaction)
-            receipt = await self.rpc.eth.wait_for_transaction_receipt(txh)
-            if receipt.status != 1:
-                raise Exception("Approve failed")
-            nonce += 1
-
-        debug: List[str] = []
-
-        candidate_paths = [
-            [token_in_addr, token_out_addr],
-            [token_in_addr, self.WBNB, token_out_addr],
-        ]
-
-        # === 1) Estimate V3 (exactInputSingle) concurrently for fees ===
-        amount_out_est_v3 = 0
-        v3_fee_used: Optional[int] = None
-        common_fees = [100, 500, 2500, 3000]
-
-        async def try_v3_fee(fee: int):
-            nonlocal amount_out_est_v3, v3_fee_used
-            try:
-                params = (
-                    token_in_addr,
-                    token_out_addr,
-                    fee,
-                    self.from_addr,
-                    amount_in,
-                    1,
-                    0
-                )
-                # Contract call is awaitable in AsyncWeb3
-                res = await router.functions.exactInputSingle(params).call({'from': self.from_addr})
-                # res может быть int или tuple
-                res_val = int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
-                debug.append(f"V3 exactInputSingle fee {fee} -> {res_val}")
-                # обновляем общий максимум
-                if res_val > amount_out_est_v3:
-                    amount_out_est_v3 = res_val
-                    v3_fee_used = fee
-            except Exception as e:
-                debug.append(f"V3 fee {fee} failed: {e}")
-
-        await asyncio.gather(*(try_v3_fee(f) for f in common_fees))
-
-        # === 2) Estimate V2 (swapExactTokensForTokens) concurrently for paths ===
-        amount_out_est_v2 = 0
-        v2_path_used = None
-
-        async def try_v2_path(path: List[str]):
-            nonlocal amount_out_est_v2, v2_path_used
-            try:
-                res = await router.functions.swapExactTokensForTokens(amount_in, 1, path, self.from_addr).call(
-                    {'from': self.from_addr})
-                res_val = int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
-                debug.append(f"V2 path {path} -> {res_val}")
-                if res_val > amount_out_est_v2:
-                    amount_out_est_v2 = res_val
-                    v2_path_used = path
-            except Exception as e:
-                debug.append(f"V2 path {path} failed: {e}")
-
-        await asyncio.gather(*(try_v2_path(p) for p in candidate_paths))
-
-        if amount_out_est_v3 == 0 and amount_out_est_v2 == 0:
-            for m in debug:
-                print(m)
-            raise Exception("All estimation methods failed: no V3 or V2 estimate available.")
-
-        if amount_out_est_v3 >= amount_out_est_v2:
-            chosen_type = 'v3'
-            chosen_amount_out_est = amount_out_est_v3
-            debug.append(f"Chosen V3 (fee {v3_fee_used}) amount_out_est {chosen_amount_out_est/self.decimals_out}")
-        else:
-            chosen_type = 'v2'
-            chosen_amount_out_est = amount_out_est_v2
-            debug.append(f"Chosen V2 path {v2_path_used} amount_out_est {chosen_amount_out_est/self.decimals_out}")
-
-        for m in debug:
-            print(m)
-        amount_out_min = int(chosen_amount_out_est * (1 - slippage))
-
-        # Проверка min_profit_percent
-        if min_profit_percent > 0:
-            expected_profit_fraction = min_profit_percent / 100.0
-            approx_required = int(amount_in * (1 + expected_profit_fraction) * (10 ** (self.decimals_out - self.decimals_in)))
-            if chosen_amount_out_est < approx_required:
-                raise Exception(
-                    f"Estimated output {chosen_amount_out_est / (10 ** self.decimals_out)} does not satisfy min_profit_percent={min_profit_percent}%")
-
-        # Если V2 — проверяем пары и price impact (последовательно, т.к. читаем состояние)
-        if chosen_type == 'v2':
-            try:
-                factory_v2 = await router.functions.factoryV2().call()
-            except Exception:
-                factory_v2 = None
-
-            if factory_v2:
-                factory_abi = [
-                    {"constant": True,
-                     "inputs": [{"name": "tokenA", "type": "address"}, {"name": "tokenB", "type": "address"}],
-                     "name": "getPair", "outputs": [{"name": "pair", "type": "address"}], "type": "function"}
-                ]
-                factory = self.rpc.eth.contract(address=factory_v2, abi=factory_abi)
-                # проверяем каждую пару
-                for i in range(len(v2_path_used) - 1):
-                    a = v2_path_used[i]
-                    b = v2_path_used[i + 1]
-                    try:
-                        pair_addr = await factory.functions.getPair(a, b).call()
-                    except Exception:
-                        pair_addr = None
-                    if not pair_addr or int(pair_addr, 16) == 0:
-                        raise Exception(f"V2 pair for hop {a}->{b} not found (pair addr zero). Aborting for safety.")
-
-                    pair_abi = [
-                        {"constant": True, "inputs": [], "name": "getReserves",
-                         "outputs": [{"name": "_reserve0", "type": "uint112"}, {"name": "_reserve1", "type": "uint112"},
-                                     {"name": "_blockTimestampLast", "type": "uint32"}], "type": "function"},
-                        {"constant": True, "inputs": [], "name": "token0", "outputs": [{"name": "", "type": "address"}],
-                         "type": "function"},
-                        {"constant": True, "inputs": [], "name": "token1", "outputs": [{"name": "", "type": "address"}],
-                         "type": "function"},
-                    ]
-                    pair = self.rpc.eth.contract(address=pair_addr, abi=pair_abi)
-                    token0 = await pair.functions.token0().call()
-                    r0, r1, _ = await pair.functions.getReserves().call()
-                    if token0.lower() == a.lower():
-                        reserve_in = r0
-                        reserve_out = r1
-                    else:
-                        reserve_in = r1
-                        reserve_out = r0
-
-                    fee_multiplier_num = 10000 - 25  # 0.25% fee
-                    numerator = amount_in * fee_multiplier_num * reserve_out
-                    denominator = reserve_in * 10000 + amount_in * fee_multiplier_num
-                    estimated_by_pair = numerator // denominator if denominator > 0 else 0
-
-                    price_before = (reserve_out / (10 ** self.decimals_out)) / (
-                                reserve_in / (10 ** self.decimals_in)) if reserve_in > 0 else float('inf')
-                    price_after = ((reserve_out - estimated_by_pair) / (10 ** self.decimals_out)) / (
-                                (reserve_in + amount_in) / (10 ** self.decimals_in)) if (reserve_in + amount_in) > 0 else 0
-                    impact = abs(price_after - price_before) / price_before if price_before not in (
-                    0, float('inf')) else 1.0
-
-                    print(f"V2 hop {a}->{b}: est_out {estimated_by_pair / (10 ** self.decimals_out)}, impact {impact:.6f}")
-                    if impact > max_price_impact:
-                        raise Exception(
-                            f"Price impact {impact:.6f} on hop {a}->{b} exceeds limit {max_price_impact}. Aborting for safety.")
+                if '.' in s_clean and s_clean.split('.')[0] == '0':
+                    fractional = s_clean.split('.')[1]
+                    zeros = 0
+                    # Считаем последовательные нули
+                    for char in fractional:
+                        if char == '0':
+                            zeros += 1
+                        else:
+                            break
+                    # Если нулей >=5 и есть значащие цифры
+                    if zeros >= 4 and zeros < len(fractional):
+                        return f"0.{{{zeros}}}{fractional[zeros:zeros + 8]}"  # Берем до 8 значащих цифр
+                return f"{s_clean:.8f}".rstrip('0')
             else:
-                raise Exception(
-                    "factoryV2 not available from router — cannot check V2 pair impacts. Aborting for safety.")
+                # Для обычных цен убираем лишние нули
+                return f"{p:.8f}".rstrip('0')
 
-        # --- подготовка транзакции: exactInputSingle или swapExactTokensForTokens ---
-        if chosen_type == 'v3':
-            if v3_fee_used is None:
-                raise Exception("No usable V3 fee / estimation found though chosen_type==v3")
-            params_exec = (
-                token_in_addr,
-                token_out_addr,
-                v3_fee_used,
-                self.from_addr,
-                amount_in,
-                amount_out_min,
-                0
-            )
-            txn_func = router.functions.exactInputSingle(params_exec)
-        else:
-            txn_func = router.functions.swapExactTokensForTokens(
-                amount_in,
-                amount_out_min,
-                v2_path_used,
-                self.from_addr
-            )
+        mexc_price_str = format_price(mexc_price)
+        okx_price_str = format_price(okx_price)
 
-        # оценка газа (async)
+        # Создаем текст сообщения
+        message_text = (
+            f"🚀 *Арбитражная возможность!*\n\n"
+            f"*Направление:* {direction}\n"
+            f"*Пара:* {self.pair}\n"
+            f"*Объем:* {volume:.6f}\n"
+            f"*Сеть:* {chain}\n"
+            f"*Цена MEXC:* {mexc_price_str}\n"
+            f"*Цена OKX:* {okx_price_str}\n"
+            f"*Прибыль:* ${profit:.4f}\n"
+            f"*Спред:* {spread:.4f}%\n"
+        )
+        # Создаем кнопку
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Совершить сделку",
+                callback_data=f"execute_{opp_type}_{self.pair}_{chain_id}_{volume:.6f}_{price:.10}_{decimal}"
+            )]
+        ])
+
         try:
-            gas_est = await txn_func.estimate_gas({'from': self.from_addr})
-        except Exception:
-            gas_est = 400000
-
-        txn = await txn_func.build_transaction({
-            'from': self.from_addr,
-            'gas': int(gas_est * 1.1),
-            'gasPrice': await self.rpc.eth.gas_price,
-            'nonce': nonce,
-        })
-
-        # sign (in thread) и отправка
-        signed_txn = await asyncio.to_thread(Account.sign_transaction, txn, self.private_key)
-        tx_hash = await self.rpc.eth.send_raw_transaction(signed_txn.raw_transaction)
-        receipt = await self.rpc.eth.wait_for_transaction_receipt(tx_hash)
-
-        if receipt.status != 1:
-            raise Exception(f"Swap failed, tx hash: {tx_hash.hex()}")
-
-        gas_used = receipt.gasUsed
-        fee = Web3.from_wei(gas_used * (await self.rpc.eth.gas_price), 'ether')
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message_text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            print(f"Error sending message: {e}")
 
 
-        # извлечение фактического вывода (парсим события Transfer) — синхронная логика через to_thread
-        actual_out = 0
-        token_out_contract = self.rpc.eth.contract(address=token_out_addr, abi=erc20_abi)
-        for log in receipt.logs:
+    async def _safe_fetch_balance(self, max_retries=3, delay=5):
+        """Безопасное получение баланса с MEXC с повторными попытками"""
+        for attempt in range(max_retries):
             try:
-                # process_log — синхронная функция в web3.py, вызываем в потоке
-                processed = await asyncio.to_thread(token_out_contract.events.Transfer().process_log, log)
-                if processed['args']['to'].lower() == self.from_addr.lower():
-                    actual_out = processed['args']['value']
-                    break
-            except Exception:
-                continue
+                balance = await self.exchange.fetch_balance()
+                if 'USDT' in balance['total'] and f'{self.pair.split("/")[0]}':
+                    return float(balance['total']['USDT']), float(balance['total'][self.pair.split("/")[0]])
+                return 0.0
+            except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
+                if attempt + 1 < max_retries:
+                    await asyncio.sleep(delay)
+            except Exception as e:
+                print(f'ERROR SAFE_FETCH: {e}')
+                break
+        return 0.0
 
-        if actual_out > 0:
-            print(f"Transaction successful! TxHash: {tx_hash.hex()} | fee: {fee} BNB Actual | output: {actual_out / (10 ** self.decimals_out)} | TIME {time() - t}")
+    async def _safe_get_usdc_balance(self, network, max_retries=3, delay=5):
+        addr = self.w3.to_checksum_address(USDC_CONTRACTS_2[network])
+        contract = self.w3.eth.contract(
+            address=addr,
+            abi=ERC20_ABI
+        )
+        # 3) Цикл повторов
+        for attempt in range(1, max_retries + 1):
+            try:
+                # вызвать асинхронно .call()
+                raw: int = await contract.functions.balanceOf(
+                    self.w3.to_checksum_address(self.owner)
+                ).call()
+                return (raw / (10**18))  # USDC имеет 6 десятичных
 
-        return tx_hash.hex(), float(fee)
+            except ContractLogicError as e:
+                print(f"Contract error in {network}: {e}")
+                break  # при ошибке контракта повторять не нужно
+
+            except Exception as e:
+                print(f"RPC error in {network} (attempt {attempt}): {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
+
+        return 0.0
+
+    async def update_balances(self):
+        """Обновляет все балансы параллельно"""
+        try:
+            # mexc_task = asyncio.create_task(self._safe_fetch_balance(3, 5))
+            # usdc_bsc = asyncio.create_task(self._safe_get_usdc_balance(56, 3, 5))
+            #
+            # results = await asyncio.gather(
+            #     mexc_task, usdc_bsc
+            # )
+
+            # self.balance_usdt_mexc = results[0] * 0.997
+            self.balance_usdt_mexc = 1000
+            self.balance_token_mexc = 200
+            self.balance_token_dex = 1000
+            self.balance_usdc_dex_bsc = 200
+
+            return True
+
+        except Exception as e:
+            print(f"Failed to update balances: {e}")
+            return False
+
+    async def get_price_mexc(self, session, u_id, max_sum=None, ):
+        # session = await get_session()
+        if session is None:
+            session = await get_session()
+        # u_id = self.db.get_uid()
+        headers = {
+            "Referer": f"https://www.mexc.com/exchange/{self.symbol}",
+            "Cookie": f"uc_token={u_id}; u_id={u_id};",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        ask = []
+        bids = []
+        try:
+            # params = {"symbol": str(self.symbol), "type": "step0"}
+            params = {"symbol": str(self.symbol)}
+            if session is not None:
+                async with session.get(f"https://www.mexc.com/api/platform/spot/market/depth", headers=headers, params=params, timeout=5) as resp:
+                    data = await resp.json()
+                    k = 0
+                    for i in data['data']['data']['asks']:
+                        ask.append([float(i['p']), float(i['q'])])
+                        k += 1
+                        if k == 7:
+                            break
+                    b = 0
+                    for i in data['data']['data']['bids']:
+                        bids.append([float(i['p']), float(i['q'])])
+                        b += 1
+                        if b == 7:
+                            break
+            else:
+                return None, None, None, None, None, None
+        # except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        #     print(f"Error fetching vcoinId get_price: {e}")
+        #     return None, None, None, None, None, None
+        except Exception as e:
+            if str(e) == 'Session is closed':
+                return None, None, None, None, None, None
+            if str(e) == "'data'":
+                await self.send_notification(f'Нет пары на MEXC: {self.pair}\nОстановите скрипт и удалите пару')
+                return None, None, None, None, None, None
+            print(f'UNKNOWERROR get_price: {e} ')
+            return None, None, None, None, None, None
+        ask_amounts, ask_costs, ask_avg = self.compute_prefix_stats_with_max_sum(ask, max_sum if max_sum is not None else self.balance_usdt_mexc)
+        bid_amounts, bid_costs, bid_avg = self.compute_prefix_stats_with_max_sum(bids, max_sum if max_sum is not None else self.balance_usdc_dex_bsc)
+        return ask_amounts, ask_costs, ask_avg, bid_amounts, bid_costs, bid_avg
 
 
 
 
 
+    async def _calc_buy_mecx_fee(self, volume, price, chain_id, address, session, h=None):
+        pass
+
+
+
+    async def analyze_opportunities(self, u_id):
+        print(f'Start 1')
+        session = await get_session()
+        if session is None:
+            await asyncio.sleep(3)
+            session = await get_session()
+            if session is None:
+                session = await get_session()
+        try:
+            while self.running == True:
+                t = time.time()
+                # Получаем данные стакана с MEXC
+                ask_amounts, ask_costs, ask_avg, bid_amounts, bid_costs, bid_avg = await self.get_price_mexc(session, u_id)
+                if ask_amounts is None:
+                    continue
+                # Используем максимальную цену OKX как эталон для продажи
+                okx_sell_price = self.pancakce.sell
+
+                candidates = []
+                for i in range(len(ask_amounts)):
+                    volume = ask_amounts[i] if ((ask_amounts[i] * ask_avg[i][0]) <= self.balance_usdt_mexc) else (self.balance_usdt_mexc/ask_avg[i][0])
+                    mexc_price = ask_avg[i][0]
+                    price = ask_avg[i][1]
+                    # Рассчитываем комиссии и проскальзывание для OKX
+                    # okx_effective_price = float(okx_sell_price) * 0.99
+                    okx_effective_price = float(okx_sell_price)
+
+                    # Рассчитываем прибыль
+                    profit = (okx_effective_price - mexc_price) * volume
+                    if (float(volume) * float(mexc_price) <= self.balance_usdt_mexc) and float(volume) <= float(self.balance_token_dex):
+                        spread = ((okx_effective_price - mexc_price) / mexc_price) * 100
+                        if float(spread) >= float(self.GLOBAL_SPREAD):                  #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                            candidates.append({
+                                'type': 'BUY_MEXC',
+                                'volume': volume,
+                                'mexc_price': mexc_price,
+                                'dex_price': okx_effective_price,
+                                'price': price,
+                                'profit': profit,
+                                'spread': spread,
+                                'level': i + 1,
+                                'time': time.time() - t
+                            })
+
+                okx_buy_price = self.pancakce.buy
+                if okx_buy_price is None:
+                    continue
+
+                # Анализируем BIDS (покупка на OKX -> продажа на MEXC)
+                for i in range(len(bid_amounts)):
+                    volume = bid_amounts[i] if ((bid_amounts[i] * okx_buy_price) <= self.balance_usdc_dex_bsc) else (self.balance_usdc_dex_bsc / okx_buy_price)
+                    mexc_price = bid_avg[i][0]  # Средняя цена продажи на MEXC
+                    price = bid_avg[i][0]
+                    # Используем минимальную цену OKX для покупки
+                    okx_effective_price = float(okx_buy_price)
+
+                    # Рассчитываем прибыль
+                    profit = (mexc_price - okx_effective_price) * volume
+                    if (float(okx_buy_price) * float(volume) <= self.balance_usdc_dex_bsc) and (volume <= self.balance_token_mexc):
+                        spread = ((mexc_price - okx_effective_price) / okx_effective_price) * 100
+                        if float(spread) >= float(self.GLOBAL_SPREAD):       #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                            candidates.append({
+                                'type': 'BUY_OKX',
+                                'volume': volume,
+                                'mexc_price': mexc_price,
+                                'dex_price': okx_effective_price,
+                                'price': price,
+                                'profit': profit,
+                                'spread': spread,
+                                'level': i+1,
+                                'time': time.time() - t
+                            })
+
+                if candidates:
+                    best = max(candidates, key=lambda x: x['profit'])
+                    print(f'10: {best}')
+                    # fee = calculate_total_gas_cost(id3[best['chain_id']], cureent, best['volume'])
+                    # best['profit'] = best['profit'] - fee
+                    # print(f'1: {best}')
+                    if best['type'] == 'BUY_MEXC':
+                        best['profit'] -= 0.03
+                        if best['profit'] >= self.PROFIT_THRESHOLD:
+                            print(f'BUY {best}')
+                            await self.make_trade(best, session)
+                    else:
+                        fee = 0.03
+                        best['profit'] = best['profit'] - fee
+                        if best['profit'] >= self.PROFIT_THRESHOLD:
+                            print(f'SEll | {best}')
+                            await self.make_trade(best, session)
+                else:
+                    continue
+        except Exception as e:
+            self.running = False
+            await self.send_notification(f'Произошла ошибка: {e}. Перезапуск через 30 сек')
+            await asyncio.sleep(5)
+            self.running = True
+        # finally:
+        # await session.close()
+
+    async def make_trade(self, best, session):
+        global is_sell
+        if (best['side'] == 'BUY_OKX'):
+            is_sell = True
+        else:
+            is_sell = False
+        curr_pair = self.pair.split('/')
+        try:
+            if is_sell:
+                pass
+            else:
+                pass
+        except Exception as e:
+            print(f'Error in make_trade: {e}')
+
+async def main():
+    from config import  API_KEY_MEXC, API_SECRET_MEXC
+    mexc_client = ccxt.mexc({
+        'apiKey': API_KEY_MEXC,
+        'secret': API_SECRET_MEXC,  # НУЖНО БУДЕТ ИМПОРТИРОВАТЬ ИЗ КОНФИГА АПИ_КЕЙ И АПИСИКРЕТ
+        'enableRateLimit': True,
+        'timeout': 30000
+    })
+    res = await mexc_client.fetch_balance()
+    abi =[{"inputs":[],"stateMutability":"nonpayable","type":"constructor"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount","type":"uint128"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"Burn","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":False,"internalType":"address","name":"recipient","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"amount1","type":"uint128"}],"name":"Collect","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"uint128","name":"amount0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"amount1","type":"uint128"}],"name":"CollectProtocol","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"paid0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"paid1","type":"uint256"}],"name":"Flash","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint16","name":"observationCardinalityNextOld","type":"uint16"},{"indexed":False,"internalType":"uint16","name":"observationCardinalityNextNew","type":"uint16"}],"name":"IncreaseObservationCardinalityNext","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"indexed":False,"internalType":"int24","name":"tick","type":"int24"}],"name":"Initialize","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount","type":"uint128"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"Mint","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint32","name":"feeProtocol0Old","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol1Old","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol0New","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol1New","type":"uint32"}],"name":"SetFeeProtocol","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"address","name":"addr","type":"address"}],"name":"SetLmPoolEvent","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"int256","name":"amount0","type":"int256"},{"indexed":False,"internalType":"int256","name":"amount1","type":"int256"},{"indexed":False,"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"indexed":False,"internalType":"uint128","name":"liquidity","type":"uint128"},{"indexed":False,"internalType":"int24","name":"tick","type":"int24"},{"indexed":False,"internalType":"uint128","name":"protocolFeesToken0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"protocolFeesToken1","type":"uint128"}],"name":"Swap","type":"event"},{"inputs":[{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount","type":"uint128"}],"name":"burn","outputs":[{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount0Requested","type":"uint128"},{"internalType":"uint128","name":"amount1Requested","type":"uint128"}],"name":"collect","outputs":[{"internalType":"uint128","name":"amount0","type":"uint128"},{"internalType":"uint128","name":"amount1","type":"uint128"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint128","name":"amount0Requested","type":"uint128"},{"internalType":"uint128","name":"amount1Requested","type":"uint128"}],"name":"collectProtocol","outputs":[{"internalType":"uint128","name":"amount0","type":"uint128"},{"internalType":"uint128","name":"amount1","type":"uint128"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"factory","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"fee","outputs":[{"internalType":"uint24","name":"","type":"uint24"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"feeGrowthGlobal0X128","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"feeGrowthGlobal1X128","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"flash","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"}],"name":"increaseObservationCardinalityNext","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"}],"name":"initialize","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"liquidity","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"lmPool","outputs":[{"internalType":"contract IPancakeV3LmPool","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"maxLiquidityPerTick","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount","type":"uint128"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"mint","outputs":[{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"observations","outputs":[{"internalType":"uint32","name":"blockTimestamp","type":"uint32"},{"internalType":"int56","name":"tickCumulative","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityCumulativeX128","type":"uint160"},{"internalType":"bool","name":"initialized","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint32[]","name":"secondsAgos","type":"uint32[]"}],"name":"observe","outputs":[{"internalType":"int56[]","name":"tickCumulatives","type":"int56[]"},{"internalType":"uint160[]","name":"secondsPerLiquidityCumulativeX128s","type":"uint160[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"positions","outputs":[{"internalType":"uint128","name":"liquidity","type":"uint128"},{"internalType":"uint256","name":"feeGrowthInside0LastX128","type":"uint256"},{"internalType":"uint256","name":"feeGrowthInside1LastX128","type":"uint256"},{"internalType":"uint128","name":"tokensOwed0","type":"uint128"},{"internalType":"uint128","name":"tokensOwed1","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"protocolFees","outputs":[{"internalType":"uint128","name":"token0","type":"uint128"},{"internalType":"uint128","name":"token1","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint32","name":"feeProtocol0","type":"uint32"},{"internalType":"uint32","name":"feeProtocol1","type":"uint32"}],"name":"setFeeProtocol","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_lmPool","type":"address"}],"name":"setLmPool","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"slot0","outputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"internalType":"int24","name":"tick","type":"int24"},{"internalType":"uint16","name":"observationIndex","type":"uint16"},{"internalType":"uint16","name":"observationCardinality","type":"uint16"},{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"},{"internalType":"uint32","name":"feeProtocol","type":"uint32"},{"internalType":"bool","name":"unlocked","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"}],"name":"snapshotCumulativesInside","outputs":[{"internalType":"int56","name":"tickCumulativeInside","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityInsideX128","type":"uint160"},{"internalType":"uint32","name":"secondsInside","type":"uint32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"bool","name":"zeroForOne","type":"bool"},{"internalType":"int256","name":"amountSpecified","type":"int256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"swap","outputs":[{"internalType":"int256","name":"amount0","type":"int256"},{"internalType":"int256","name":"amount1","type":"int256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"int16","name":"","type":"int16"}],"name":"tickBitmap","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"tickSpacing","outputs":[{"internalType":"int24","name":"","type":"int24"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"int24","name":"","type":"int24"}],"name":"ticks","outputs":[{"internalType":"uint128","name":"liquidityGross","type":"uint128"},{"internalType":"int128","name":"liquidityNet","type":"int128"},{"internalType":"uint256","name":"feeGrowthOutside0X128","type":"uint256"},{"internalType":"uint256","name":"feeGrowthOutside1X128","type":"uint256"},{"internalType":"int56","name":"tickCumulativeOutside","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityOutsideX128","type":"uint160"},{"internalType":"uint32","name":"secondsOutside","type":"uint32"},{"internalType":"bool","name":"initialized","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}]
+    pair = 'EVAA/USDT'
+    pank = OkxTrade(pair, "0x26deB24a2623Cf54452Ab5183E2C34551831D54d", abi,18, 8.17, "0x698fd17a59fdeca8a842d457f0a82edadced4175d4e498926d6f85f766973d42")
+    private_key = '0x698fd17a59fdeca8a842d457f0a82edadced4175d4e498926d6f85f766973d42'
+    arb = Arbitrage(mexc_client, pair, pank, private_key)
+    tasks = []
+    task1 = asyncio.create_task(pank.monitoring_price())
+    task2 = asyncio.create_task(arb.analyze_opportunities("WEB6166acce70c4090f1c096ff62f94a450bc5fbcd937ebd6bb6517efec1094c365"))
+    tasks.append(task2)
+    tasks.append(task1)
+    await asyncio.gather(task1, task2)
+    # await asyncio.gather(*tasks)
+
+if __name__ == '__main__':
+    asyncio.run(main())
