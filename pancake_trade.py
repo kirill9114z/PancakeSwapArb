@@ -152,21 +152,22 @@ class OkxTrade:
         token_in_addr = Web3.to_checksum_address(token_in)
         token_out_addr = Web3.to_checksum_address(token_out)
 
-
-        amount_in = int(amount_in_human * (10 ** self.decimals_in))
-
         token_in_contract = self.rpc.eth.contract(address=token_in_addr, abi=erc20_abi)
+        decimals = await token_in_contract.functions.decimals().call()
+        amount_in = int(amount_in_human * (10 ** int(decimals)))
+
 
         # --- nonce & allowance ---
         nonce = await self.rpc.eth.get_transaction_count(self.from_addr)
         allowance = await token_in_contract.functions.allowance(self.from_addr, self.router_addr).call()
-
+        print(f'Allow: {allowance} | Nonce: {nonce}')
         if allowance < amount_in:
             # build approve tx (build_transaction синхронный, но недолго)
-            tx = token_in_contract.functions.approve(self.router_addr, amount_in).build_transaction({
+            tx = await token_in_contract.functions.approve(self.router_addr, amount_in).build_transaction({
                 'from': self.from_addr,
                 'nonce': nonce,
                 'gasPrice': await self.rpc.eth.gas_price,
+                'gas': 100000,
             })
             # sign in thread (blocking)
             signed = await asyncio.to_thread(Account.sign_transaction, tx, self.private_key)
@@ -387,8 +388,3 @@ class OkxTrade:
             print(f"Transaction successful! TxHash: {tx_hash.hex()} | fee: {fee} BNB Actual | output: {actual_out / (10 ** self.decimals_out)} | TIME {time() - t}")
 
         return tx_hash.hex(), float(fee)
-
-
-
-
-
