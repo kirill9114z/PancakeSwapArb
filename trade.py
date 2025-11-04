@@ -10,16 +10,11 @@ from web3 import AsyncWeb3
 
 from exchange import place_limit_order, get_session
 from config import RPC_BSC
-from okx_help import price_eth, price_bnb, price_calc, get_spender_address, calculate_total_gas_cost
 USDC_CONTRACTS = {
-    'ERC20': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-    'BASE': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     'BEP20': '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'
 }
 
 USDC_CONTRACTS_2 = {
-    1: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-    8453: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     56: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'
 }
 
@@ -131,11 +126,12 @@ class Arbitrage:
         return cum_amounts, cum_costs, avg_prices
 
     async def send_notification(self, message: str):
-        if self.bot and self.chat_id:
-            try:
-                await self.bot.send_message(self.chat_id, message)
-            except Exception as e:
-                print(f"Ошибка отправки уведомления: {e}")
+        # if self.bot and self.chat_id:
+        #     try:
+        #         await self.bot.send_message(self.chat_id, message)
+        #     except Exception as e:
+        #         print(f"Ошибка отправки уведомления: {e}")
+        print(f'SEND NOTIF: {message}')
 
     async def send_opportunity_alert(self, opportunity):
         """Отправляет сообщение об арбитражной возможности с кнопкой"""
@@ -329,7 +325,7 @@ class Arbitrage:
             if str(e) == "'data'":
                 await self.send_notification(f'Нет пары на MEXC: {self.pair}\nОстановите скрипт и удалите пару')
                 return None, None, None, None, None, None
-            print(f'UNKNOWERROR get_price: {e} {data}')
+            print(f'UNKNOWERROR get_price: {e} ')
             return None, None, None, None, None, None
         ask_amounts, ask_costs, ask_avg = self.compute_prefix_stats_with_max_sum(ask, max_sum if max_sum is not None else self.balance_usdt_mexc)
         bid_amounts, bid_costs, bid_avg = self.compute_prefix_stats_with_max_sum(bids, max_sum if max_sum is not None else self.balance_usdc_dex_bsc)
@@ -340,23 +336,9 @@ class Arbitrage:
 
 
     async def _calc_buy_mecx_fee(self, volume, price, chain_id, address, session, h=None):
-        """Комиссии для: Покупка на MEXC -> Вывод -> OKX"""
-        global winrdraw_fee
-        fees = (float(volume) * float(price)) * 0.0005  # Комиссия MEXC
+        pass
 
-        if h is None:
-            trade_fee, _ = await calculate_total_gas_cost(str(chain_id), address, session, volume)
-            fees += trade_fee
-        return fees
 
-    async def _calc_buy_okx_fee(self, volume, price, chain_id, address, session, h=None):
-        """Комиссии для: Покупка на OKX -> Перевод -> Продажа на MEXC"""
-        fees = 0.0
-        fees += (float(volume) * float(price)) * 0.0005
-        if h is None:
-            trade_fee, transef_fee = await calculate_total_gas_cost(chain_id, address, session, volume)
-            fees += trade_fee + transef_fee
-        return fees
 
     async def analyze_opportunities(self, u_id):
         print(f'Start 1')
