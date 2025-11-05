@@ -139,17 +139,9 @@ class Arbitrage:
         if not self.bot or not self.chat_id:
             print("Bot or chat_id not initialized. Cannot send message.")
             return
-        chain = ''
-        decimal = 0
-        if int(opportunity['chain_id']) == 1:
-            decimal = self.okx_client.decimals[1]
-            chain = 'ETH'
-        if int(opportunity['chain_id']) == 8453:
-            decimal = self.okx_client.decimals[8453]
-            chain = 'BASE'
-        if int(opportunity['chain_id']) == 56:
-            decimal = self.okx_client.decimals[56]
-            chain = 'BSC'
+
+        decimal = self.okx_client.decimals[56]
+        chain = 'BSC'
         # Форматируем сообщение
         opp_type = opportunity['type']
         volume = opportunity['volume']
@@ -528,7 +520,82 @@ class Arbitrage:
                         await self.update_balances()
                         return
             else:
-                pass
+                order = await place_limit_order(curr_pair, best["price"], best['volume'], False, u_id)
+                if order == False:
+                    await self.send_notification(
+                        'Скрипт остановлен, U_id токен устарел, нажмите настройки и поменяйте на новый')
+                    self.running = False
+                print(f"ОРДЕРД {order}")
+                if order:
+                    order_id = order['data']
+                    tim = time.time()
+                    while True:
+                        status = await self.exchange.fetch_order(order_id, self.pair)
+                        if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] == 0:
+                            await self.exchange.cancel_order(order_id, self.pair)
+                            return
+                        if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] > 0:
+                            await self.exchange.cancel_order(order_id, self.pair)
+                            val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
+                            if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
+                                await self.send_notification(
+                                    'Не получилось сделать транзакцию на Raydium, сделка вернулась')
+                                await self.update_balances()
+                                return
+                            else:
+                                print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
+                                notification_text = (
+                                    f"🔔 Новая сделка!\n"
+                                    f"Тип: {'Продажа' if best['side'] == 'sell' else 'Покупка'}\n"
+                                    f"Объем: {status['filled']:.2f}\n"
+                                    f"Прибыль: ${(status['filled'] / best["amount"]) * best['profit']:.2f}\n"
+                                    f"Хэш: {val}"
+                                )
+                                await self.send_notification(notification_text)
+                                await self.update_balances()
+                                return
+                        if status['status'] == 'closed':
+                            print(status)
+                            break
+                        if status['status'] == "canceled":
+                            val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
+                            if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
+                                await self.send_notification(
+                                    'Не получилось сделать транзакцию на Raydium, сделка вернулась')
+                                await self.update_balances()
+                                return
+                            else:
+                                print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
+                                notification_text = (
+                                    f"🔔 Новая сделка!\n"
+                                    f"Тип: {'Продажа' if best['side'] == 'sell' else 'Покупка'}\n"
+                                    f"Объем: {status['filled']:.2f}\n"
+                                    f"Прибыль: ${(status['filled'] / best["amount"]) * best['profit']:.2f}\n"
+                                    f"Хэш: {val}"
+                                )
+                                await self.send_notification(notification_text)
+                                await self.update_balances()
+                                return
+                        await asyncio.sleep(0.05)
+                    # 3) DEX swap
+                    val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
+                    if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
+                        await self.send_notification(
+                            'Не получилось сделать транзакцию на Raydium, сделка вернулась')
+                        await self.update_balances()
+                        return
+                    else:
+                        print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
+                        notification_text = (
+                            f"🔔 Новая сделка!\n"
+                            f"Тип: {'Продажа' if best['side'] == 'sell' else 'Покупка'}\n"
+                            f"Объем: {best['amount']:.2f}\n"
+                            f"Прибыль: ${best['profit']:.2f}\n"
+                            f"Хэш: {val}"
+                        )
+                        await self.send_notification(notification_text)
+                        await self.update_balances()
+                        return
         except Exception as e:
             print(f'Error in make_trade: {e}')
 
