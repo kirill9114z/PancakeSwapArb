@@ -34,7 +34,7 @@ class Arbitrage:
         self.balance_token_mexc = 120
         self.balance_token_dex = 120
         self.balance_usdc_dex_bsc = 400
-        self.netive_token = 0
+        self.native_token = 0
 
 
         self.Is_enough_balance_for_fee = True
@@ -207,7 +207,24 @@ class Arbitrage:
                 break
         return 0.0
 
-    async def _safe_get_usdt_balance(self, address, decimals, max_retries=3, delay=5):
+    async def _safe_get_bnb_balance(self, max_retries=3, delay=5):
+        """Получение баланса нативной монеты BNB"""
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Получаем баланс напрямую через web3
+                raw_balance = await self.w3.eth.get_balance(
+                    self.w3.to_checksum_address(self.owner)
+                )
+                return raw_balance / (10 ** 18)  # BNB имеет 18 десятичных знаков
+
+            except Exception as e:
+                print(f"RPC error in (attempt {attempt}): {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
+
+        return 0.0
+
+    async def _safe_get_erc20_balance(self, address, decimals, max_retries=3, delay=5):
         addr = self.w3.to_checksum_address(address)
         contract = self.w3.eth.contract(
             address=addr,
@@ -220,6 +237,7 @@ class Arbitrage:
                 raw: int = await contract.functions.balanceOf(
                     self.w3.to_checksum_address(self.owner)
                 ).call()
+                return (raw / (10**decimals))
                 return (raw / (10**18))
 
             except ContractLogicError as e:
@@ -236,20 +254,12 @@ class Arbitrage:
     async def update_balances(self):
         """Обновляет все балансы параллельно"""
         try:
-            # mexc_task = asyncio.create_task(self._safe_fetch_balance(3, 5))
-            # usdc_bsc = asyncio.create_task(self._safe_get_usdc_balance(56, 3, 5))
-            #
-            # results = await asyncio.gather(
-            #     mexc_task, usdc_bsc
-            # )
 
-            # self.balance_usdt_mexc = results[0] * 0.997
             self.balance_usdt_mexc = 1000
             self.balance_token_mexc = 200
             self.balance_token_dex = 1000
             self.balance_usdc_dex_bsc = 200
-            
-            self.nati
+            self.native_token = 0
 
             return True
 
