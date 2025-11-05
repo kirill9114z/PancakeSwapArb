@@ -328,7 +328,9 @@ class Arbitrage:
 
 
 
-    async def _calc_buy_mecx_fee(self, volume, price, chain_id, address, session, h=None):
+    async def _calc_buy_mecx_fee(self, volume, price, address, session, h=None):
+        pass
+    async def _calc_sell_mexc_fee(self, volume, ):
         pass
 
 
@@ -416,18 +418,12 @@ class Arbitrage:
                         best['profit'] -= 0.03
                         if best['profit'] >= self.PROFIT_THRESHOLD:
                             print(f'BUY {best}')
-                            res, fee = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, 0.15, 0.05)
-                            print(f'Success!!!! Hex: {res}, Fee: {fee}')
-                            await asyncio.sleep(30000)
                             await self.make_trade(best, session)
                     else:
                         fee = 0.03
                         best['profit'] = best['profit'] - fee
                         if best['profit'] >= self.PROFIT_THRESHOLD:
                             print(f'SEll | {best}')
-                            res, fee = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, 0.03, 0.05)
-                            print(f'Succes!!! Hex: {res}, fee: {fee}')
-                            await asyncio.sleep(30000000)
                             await self.make_trade(best, session)
                 else:
                     continue
