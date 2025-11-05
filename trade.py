@@ -30,10 +30,10 @@ class Arbitrage:
 
         self.running = True
 
-        self.balance_usdt_mexc = 400
-        self.balance_token_mexc = 120
-        self.balance_token_dex = 120
-        self.balance_usdc_dex_bsc = 400
+        self.balance_usdt_mexc = 200
+        self.balance_token_mexc = 70
+        self.balance_token_dex = 70
+        self.balance_usdc_dex_bsc = 200
         self.native_token = 0
 
 
@@ -43,7 +43,7 @@ class Arbitrage:
         self._withdrawal_fee_cache = {}
         self._cache_lock = asyncio.Lock()
 
-        self.PROFIT_THRESHOLD = 0.5
+        self.PROFIT_THRESHOLD = 0.1
         self.GLOBAL_SPREAD = 0.01
 
         self.last_alert = {}
@@ -196,9 +196,10 @@ class Arbitrage:
         for attempt in range(max_retries):
             try:
                 balance = await self.exchange.fetch_balance()
-                if 'USDT' in balance['total'] and f'{self.pair.split("/")[0]}':
-                    return float(balance['total']['USDT']), float(balance['total'][self.pair.split("/")[0]])
-                return 0.0
+                if 'USDT' in balance['total'] and f'{self.pair.split("/")[0]}' in balance['total']:
+                    # return float(balance['total']['USDT']), float(balance['total'][self.pair.split("/")[0]])
+                    return 2, 4
+                return 2, 3
             except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
                 if attempt + 1 < max_retries:
                     await asyncio.sleep(delay)
@@ -254,18 +255,49 @@ class Arbitrage:
     async def update_balances(self):
         """Обновляет все балансы параллельно"""
         try:
+            # Создаем задачи для всех балансов
+            tasks = [
+                self._get_mexc_balances(),
+                self._safe_get_bnb_balance(),
+                self._get_dex_balances(18)
+            ]
 
-            self.balance_usdt_mexc = 1000
-            self.balance_token_mexc = 200
-            self.balance_token_dex = 1000
-            self.balance_usdc_dex_bsc = 200
-            self.native_token = 0
+            # Выполняем все задачи параллельно
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            # Обрабатываем результаты
+            mexc_balances, bnb_balance, dex_balances = results
+
+            # Устанавливаем балансы MEXC
+            self.balance_usdt_mexc, self.balance_token_mexc = mexc_balances
+            self.native_token = bnb_balance
+            self.balance_token_dex, self.balance_usdc_dex_bsc = dex_balances
+            print(self.balance_usdt_mexc, self.balance_token_mexc)
+            print(self.native_token)
+            print(self.balance_token_dex, self.balance_usdc_dex_bsc)
             return True
 
         except Exception as e:
             print(f"Failed to update balances: {e}")
             return False
+
+    async def _get_mexc_balances(self):
+        """Получает балансы с MEXC"""
+        usdt_balance, token_balance = await self._safe_fetch_balance()
+        return usdt_balance, token_balance
+
+
+    async def _get_dex_balances(self, token_decimals):
+        """Получает балансы токенов на DEX параллельно"""
+        # Запускаем запросы балансов параллельно
+        token_task = self._safe_get_erc20_balance(self.address, token_decimals)
+        usdc_task = self._safe_get_erc20_balance(USDT_CONTRACTS, 18)
+
+        token_balance, usdc_balance = await asyncio.gather(token_task, usdc_task)
+        return token_balance, usdc_balance
+
+
+
 
     async def get_price_mexc(self, session, u_id, max_sum=None, ):
         # session = await get_session()
@@ -600,11 +632,14 @@ async def main():
         private_key = '0x698fd17a59fdeca8a842d457f0a82edadced4175d4e498926d6f85f766973d42'
         arb = Arbitrage(mexc_client, pair, pank, private_key, "0xaa036928c9c0Df07d525B55ea8EE690Bb5a628C1")
         tasks = []
-        task1 = asyncio.create_task(pank.monitoring_price())
-        task2 = asyncio.create_task(arb.analyze_opportunities("WEB6166acce70c4090f1c096ff62f94a450bc5fbcd937ebd6bb6517efec1094c365"))
-        tasks.append(task2)
-        tasks.append(task1)
-        await asyncio.gather(task1, task2)
+        await arb.update_balances()
+        # task1 = asyncio.create_task(pank.monitoring_price())
+        # task2 = asyncio.create_task(arb.analyze_opportunities("WEB6166acce70c4090f1c096ff62f94a450bc5fbcd937ebd6bb6517efec1094c365"))
+        # tasks.append(task2)
+        # tasks.append(task1)
+        print(f'2013')
+        # await asyncio.gather(task1, task2)
+
         # await asyncio.gather(*tasks)
     except Exception as e:
         print(f'100000: {e}')
