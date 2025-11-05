@@ -120,14 +120,13 @@ class OkxTrade:
         side = await self.side(pool)
         if side is None:
             print("side1 is None, невозможна работа")
-            # можно либо завершить, либо подождать и пробовать снова
             return
         while True:
             try:
                 events = swap_filter.get_new_entries()
                 for e in events:
                     await self.handle_event(e, side)
-                await asyncio.sleep(0.01)
+                # await asyncio.sleep(0.01)
             except Exception as exc:
                 print("Ошибка при получении новых записей:", exc)
 
@@ -160,7 +159,6 @@ class OkxTrade:
         # --- nonce & allowance ---
         nonce = await self.rpc.eth.get_transaction_count(self.from_addr)
         allowance = await token_in_contract.functions.allowance(self.from_addr, self.router_addr).call()
-        print(f'Allow: {allowance} | Nonce: {nonce}')
         if allowance < amount_in:
             # build approve tx (build_transaction синхронный, но недолго)
             tx = await token_in_contract.functions.approve(self.router_addr, amount_in).build_transaction({
@@ -354,7 +352,7 @@ class OkxTrade:
 
         txn = await txn_func.build_transaction({
             'from': self.from_addr,
-            'gas': int(gas_est * 1.1),
+            'gas': int(gas_est * 1.3),
             'gasPrice': await self.rpc.eth.gas_price,
             'nonce': nonce,
         })
