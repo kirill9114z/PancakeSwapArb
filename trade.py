@@ -4,6 +4,7 @@ import json
 import ccxt.async_support as ccxt
 from aiogram.client.session import aiohttp
 from eth_account import Account
+from eth_abi import decode
 from web3.exceptions import ContractLogicError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from pancake_trade import OkxTrade
@@ -25,7 +26,8 @@ class Arbitrage:
         self.address = address
         self.pancakce = pancakce
         self.private_key = privat_key
-        self.owner = Account.from_key(self.private_key).address
+        self.owner = Account.from_key(self.private_key)
+        # self.owner = Keypair.from_base58_string(self.private_key)
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_BSC))
 
         self.running = True
@@ -56,7 +58,11 @@ class Arbitrage:
         with open('erc20_abi.json', 'r') as f:
             self.erc20_abi = json.load(f)
 
+        with open('multicall_abi.json', 'r') as f:
+            self.multicall_abi = json.load(f)
 
+
+        self.multicall_address = "0xcA11bde05977b3631167028862bE2a173976CA11"
         self.WBNB = Web3.to_checksum_address("0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")
         self.tes = self.pair.split('/')
         self.symbol = f"{self.tes[0]}_{self.tes[1]}"
@@ -105,11 +111,11 @@ class Arbitrage:
         return cum_amounts, cum_costs, avg_prices
 
     async def send_notification(self, message: str):
-        # if self.bot and self.chat_id:
-        #     try:
-        #         await self.bot.send_message(self.chat_id, message)
-        #     except Exception as e:
-        #         print(f"Ошибка отправки уведомления: {e}")
+        if self.bot and self.chat_id:
+            try:
+                await self.bot.send_message(self.chat_id, message)
+            except Exception as e:
+                print(f"Ошибка отправки уведомления: {e}")
         print(f'SEND NOTIF: {message}')
 
     async def send_opportunity_alert(self, opportunity):
@@ -191,112 +197,300 @@ class Arbitrage:
             print(f"Error sending message: {e}")
 
 
-    async def _safe_fetch_balance(self, max_retries=3, delay=5):
-        """Безопасное получение баланса с MEXC с повторными попытками"""
-        for attempt in range(max_retries):
-            try:
-                balance = await self.exchange.fetch_balance()
-                if 'USDT' in balance['total'] and f'{self.pair.split("/")[0]}' in balance['total']:
-                    # return float(balance['total']['USDT']), float(balance['total'][self.pair.split("/")[0]])
-                    return 2, 4
-                return 2, 3
-            except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
-                if attempt + 1 < max_retries:
-                    await asyncio.sleep(delay)
-            except Exception as e:
-                print(f'ERROR SAFE_FETCH: {e}')
-                break
-        return 0.0
+    # async def _safe_fetch_balance(self, max_retries=3, delay=5):
+    #     """Безопасное получение баланса с MEXC с повторными попытками"""
+    #     for attempt in range(max_retries):
+    #         try:
+    #             balance = await self.exchange.fetch_balance()
+    #             if 'USDT' in balance['total'] and f'{self.pair.split("/")[0]}' in balance['total']:
+    #                 # return float(balance['total']['USDT']), float(balance['total'][self.pair.split("/")[0]])
+    #                 return 2, 4
+    #             return 2, 3
+    #         except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
+    #             if attempt + 1 < max_retries:
+    #                 await asyncio.sleep(delay)
+    #         except Exception as e:
+    #             print(f'ERROR SAFE_FETCH: {e}')
+    #             break
+    #     return 0.0
+    #
+    # async def _safe_get_bnb_balance(self, max_retries=3, delay=5):
+    #     """Получение баланса нативной монеты BNB"""
+    #     for attempt in range(1, max_retries + 1):
+    #         try:
+    #             # Получаем баланс напрямую через web3
+    #             raw_balance = await self.w3.eth.get_balance(
+    #                 self.w3.to_checksum_address(self.owner.address)
+    #             )
+    #             return raw_balance / (10 ** 18)  # BNB имеет 18 десятичных знаков
+    #
+    #         except Exception as e:
+    #             print(f"RPC error in (attempt {attempt}): {e}")
+    #             if attempt < max_retries:
+    #                 await asyncio.sleep(delay)
+    #
+    #     return 0.0
+    #
+    # async def _safe_get_erc20_balance(self, address, decimals, max_retries=3, delay=5):
+    #     print(f' Addres: {self.owner.address}')
+    #     addr = self.w3.to_checksum_address(address)
+    #     contract = self.w3.eth.contract(
+    #         address=addr,
+    #         abi=self.erc20_abi
+    #     )
+    #     # 3) Цикл повторов
+    #     for attempt in range(1, max_retries + 1):
+    #         try:
+    #             # вызвать асинхронно .call()
+    #             raw: int = await contract.functions.balanceOf(
+    #                 self.w3.to_checksum_address(self.owner.address)
+    #             ).call()
+    #             print(f' RES : {raw}  |  {raw/10**18}')
+    #             return (raw / (10**decimals))
+    #             # return (raw / (10**18))
+    #
+    #         except ContractLogicError as e:
+    #             print(f"Contract error: {e}")
+    #             break  # при ошибке контракта повторять не нужно
+    #
+    #         except Exception as e:
+    #             print(f"RPC error in (attempt {attempt}): {e}")
+    #             if attempt < max_retries:
+    #                 await asyncio.sleep(delay)
+    #
+    #     return 0.0
+    #
+    # async def update_balances(self):
+    #     """Обновляет все балансы параллельно"""
+    #     try:
+    #         t = time.time()
+    #         # Создаем задачи для всех балансов
+    #         tasks = [
+    #             self._get_mexc_balances(),
+    #             self._safe_get_bnb_balance(),
+    #             self._get_dex_balances(18)
+    #         ]
+    #
+    #         # Выполняем все задачи параллельно
+    #         results = await asyncio.gather(*tasks, return_exceptions=True)
+    #
+    #         # Обрабатываем результаты
+    #         mexc_balances, bnb_balance, dex_balances = results
+    #
+    #         # Устанавливаем балансы MEXC
+    #         self.balance_usdt_mexc, self.balance_token_mexc = mexc_balances
+    #         self.native_token = bnb_balance
+    #         self.balance_token_dex, self.balance_usdc_dex_bsc = dex_balances
+    #         print(self.balance_usdt_mexc, self.balance_token_mexc)
+    #         print(self.native_token)
+    #         print(self.balance_token_dex, self.balance_usdc_dex_bsc)
+    #         print(f'TIME: {time.time() - t}')
+    #         return True
+    #
+    #     except Exception as e:
+    #         print(f"Failed to update balances: {e}")
+    #         return False
+    #
+    # async def _get_mexc_balances(self):
+    #     """Получает балансы с MEXC"""
+    #     usdt_balance, token_balance = await self._safe_fetch_balance()
+    #     return usdt_balance, token_balance
+    #
+    #
+    # async def _get_dex_balances(self, token_decimals):
+    #     """Получает балансы токенов на DEX параллельно"""
+    #     # Запускаем запросы балансов параллельно
+    #     token_task = self._safe_get_erc20_balance("0xaa036928c9c0Df07d525B55ea8EE690Bb5a628C1", token_decimals)
+    #     usdc_task = self._safe_get_erc20_balance(USDT_CONTRACTS, 18)
+    #
+    #     token_balance, usdc_balance = await asyncio.gather(token_task, usdc_task)
+    #     return token_balance, usdc_balance
 
-    async def _safe_get_bnb_balance(self, max_retries=3, delay=5):
-        """Получение баланса нативной монеты BNB"""
-        for attempt in range(1, max_retries + 1):
-            try:
-                # Получаем баланс напрямую через web3
-                raw_balance = await self.w3.eth.get_balance(
-                    self.w3.to_checksum_address(self.owner)
-                )
-                return raw_balance / (10 ** 18)  # BNB имеет 18 десятичных знаков
 
-            except Exception as e:
-                print(f"RPC error in (attempt {attempt}): {e}")
-                if attempt < max_retries:
-                    await asyncio.sleep(delay)
 
-        return 0.0
 
-    async def _safe_get_erc20_balance(self, address, decimals, max_retries=3, delay=5):
-        addr = self.w3.to_checksum_address(address)
-        contract = self.w3.eth.contract(
-            address=addr,
-            abi=self.erc20_abi
-        )
-        # 3) Цикл повторов
-        for attempt in range(1, max_retries + 1):
-            try:
-                # вызвать асинхронно .call()
-                raw: int = await contract.functions.balanceOf(
-                    self.w3.to_checksum_address(self.owner)
-                ).call()
-                return (raw / (10**decimals))
-                return (raw / (10**18))
 
-            except ContractLogicError as e:
-                print(f"Contract error: {e}")
-                break  # при ошибке контракта повторять не нужно
-
-            except Exception as e:
-                print(f"RPC error in (attempt {attempt}): {e}")
-                if attempt < max_retries:
-                    await asyncio.sleep(delay)
-
-        return 0.0
-
-    async def update_balances(self):
-        """Обновляет все балансы параллельно"""
+    async def update_balances(self, stale_seconds: int = 3):
         try:
-            # Создаем задачи для всех балансов
-            tasks = [
-                self._get_mexc_balances(),
-                self._safe_get_bnb_balance(),
-                self._get_dex_balances(18)
+            t0 = time.time()
+
+            token_addresses = [
+                "0xaa036928c9c0Df07d525B55ea8EE690Bb5a628C1",  # ваш токен
+                USDT_CONTRACTS
             ]
+            decimals_map = {
+                token_addresses[0]: 18,
+                token_addresses[1]: 18
+            }
 
-            # Выполняем все задачи параллельно
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            task_exchange = asyncio.create_task(self._safe_fetch_balance())
+            task_multicall = asyncio.create_task(
+                self._multicall_balances_with_native(token_addresses, self.owner.address, decimals_map)
+            )
 
-            # Обрабатываем результаты
-            mexc_balances, bnb_balance, dex_balances = results
+            mexc_res, multicall_res = await asyncio.gather(task_exchange, task_multicall, return_exceptions=True)
 
-            # Устанавливаем балансы MEXC
-            self.balance_usdt_mexc, self.balance_token_mexc = mexc_balances
-            self.native_token = bnb_balance
-            self.balance_token_dex, self.balance_usdc_dex_bsc = dex_balances
-            print(self.balance_usdt_mexc, self.balance_token_mexc)
-            print(self.native_token)
-            print(self.balance_token_dex, self.balance_usdc_dex_bsc)
+            if isinstance(mexc_res, Exception):
+                print("MEXC task error:", mexc_res)
+                mexc_res = (0.0, 0.0)
+
+            if isinstance(multicall_res, Exception):
+                print("Multicall task error:", multicall_res)
+                token_dict = {addr: 0.0 for addr in token_addresses}
+                native_val = await self._safe_get_bnb_balance()
+            else:
+                token_dict, native_val = multicall_res
+                if native_val is None:
+                    native_val = await self._safe_get_bnb_balance()
+
+            self.balance_usdt_mexc, self.balance_token_mexc = mexc_res
+            self.native_token = native_val
+            self.balance_token_dex = token_dict.get(token_addresses[0], 0.0)
+            self.balance_usdc_dex_bsc = token_dict.get(token_addresses[1], 0.0)
+
+            print(f"MEXC {self.balance_usdt_mexc, self.balance_token_mexc}")
+            print(f"Native: {self.native_token}")
+            print(f"Dex: {self.balance_token_dex, self.balance_usdc_dex_bsc}")
+            print(f"TIME: {time.time() - t0}")
+
             return True
-
         except Exception as e:
             print(f"Failed to update balances: {e}")
             return False
 
-    async def _get_mexc_balances(self):
-        """Получает балансы с MEXC"""
-        usdt_balance, token_balance = await self._safe_fetch_balance()
-        return usdt_balance, token_balance
+    async def _safe_fetch_balance(self, max_retries: int = 2, delay: float = 0.5):
+        """
+        Получить балансы с биржи (USDT и токен).
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                # таймаут на случай зависания
+                res = await asyncio.wait_for(self.exchange.fetch_balance(), timeout=6)
+                base_symbol = self.pair.split("/")[0]
+                usdt = float(res['total'].get('USDT', 0))
+                token = float(res['total'].get(base_symbol, 0))
+                return usdt, token
+            except asyncio.TimeoutError:
+                print(f"fetch_balance timeout attempt {attempt}")
+            except Exception as e:
+                print(f"ERROR SAFE_FETCH attempt {attempt}: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(delay)
+        return 0.0, 0.0
 
+    async def _safe_get_bnb_balance(self, max_retries: int = 3, delay: float = 1.0):
+        """
+        Получить баланс нативной монеты (BNB).
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                raw = await asyncio.wait_for(
+                    self.w3.eth.get_balance(self.w3.to_checksum_address(self.owner.address)),
+                    timeout=5
+                )
+                return raw / (10 ** 18)
+            except asyncio.TimeoutError:
+                print(f"BNB balance timeout attempt {attempt}")
+            except Exception as e:
+                print(f"RPC error in BNB (attempt {attempt}): {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(delay)
+        return 0.0
 
-    async def _get_dex_balances(self, token_decimals):
-        """Получает балансы токенов на DEX параллельно"""
-        # Запускаем запросы балансов параллельно
-        token_task = self._safe_get_erc20_balance(self.address, token_decimals)
-        usdc_task = self._safe_get_erc20_balance(USDT_CONTRACTS, 18)
+    async def _multicall_balances_with_native(self,
+                                              token_addresses: list,
+                                              wallet_address: str,
+                                              token_decimals_map: dict):
+        mc = self.w3.eth.contract(
+            address=self.w3.to_checksum_address(self.multicall_address),
+            abi=self.multicall_abi
+        )
 
-        token_balance, usdc_balance = await asyncio.gather(token_task, usdc_task)
-        return token_balance, usdc_balance
+        wallet_addr = self.w3.to_checksum_address(wallet_address)
+        calls = []
 
+        # токены
+        for ta in token_addresses:
+            token_contract = self.w3.eth.contract(
+                address=self.w3.to_checksum_address(ta),
+                abi= self.erc20_abi
+            )
+            call_data = token_contract.encode_abi(
+                abi_element_identifier='balanceOf',
+                args=[wallet_addr]
+            )
+            calls.append((self.w3.to_checksum_address(ta), call_data))
 
+        calls.append((wallet_addr, "0x"))
+
+        try:
+            result = await mc.functions.aggregate(calls).call()
+            _, return_data_list = result
+        except Exception as e:
+            print(f"Multicall failed (with native) : {e}")
+            # fallback
+            token_vals = await asyncio.gather(
+                *(self._safe_get_erc20_balance(addr, token_decimals_map.get(addr, 18))
+                  for addr in token_addresses)
+            )
+            native = await self._safe_get_bnb_balance()
+            return dict(zip(token_addresses, token_vals)), native
+
+        balances = {}
+        native_balance = None
+
+        # парсим токены
+        for idx, addr in enumerate(token_addresses):
+            raw_bytes = return_data_list[idx]
+            try:
+                # преобразование
+                if isinstance(raw_bytes, str) and raw_bytes.startswith("0x"):
+                    data_bytes = bytes.fromhex(raw_bytes[2:])
+                else:
+                    data_bytes = raw_bytes
+                raw_int = decode(['uint256'], data_bytes)[0]
+                decimals = token_decimals_map.get(addr, 18)
+                balances[addr] = raw_int / (10 ** decimals)
+            except Exception as e:
+                print(f"Failed parse token {addr}: {e}")
+                balances[addr] = 0.0
+
+        # парсим нативку (последний)
+        raw_native_bytes = return_data_list[len(token_addresses)]
+        try:
+            if isinstance(raw_native_bytes, str) and raw_native_bytes.startswith("0x"):
+                data_bytes = bytes.fromhex(raw_native_bytes[2:])
+            else:
+                data_bytes = raw_native_bytes
+            native_int = decode(['uint256'], data_bytes)[0]
+            native_balance = native_int / (10 ** 18)
+        except Exception as e:
+            print(f"Failed parse native balance: {e}")
+            native_balance = None
+
+        return balances, native_balance
+
+    async def _safe_get_erc20_balance(self, address: str, decimals: int,
+                                      max_retries: int = 3, delay: float = 1.0):
+        """
+        Индивидуальный вызов баланса ERC-20. Используется как fallback.
+        """
+        addr = self.w3.to_checksum_address(address)
+        contract = self.w3.eth.contract(address=addr, abi=self.erc20_abi)
+        for attempt in range(1, max_retries + 1):
+            try:
+                raw = await asyncio.wait_for(
+                    contract.functions.balanceOf(self.w3.to_checksum_address(self.owner.address)).call(),
+                    timeout=5
+                )
+                return raw / (10 ** decimals)
+            except asyncio.TimeoutError:
+                print(f"ERC20 balance timeout attempt {attempt} for {address}")
+            except Exception as e:
+                print(f"RPC error ERC20 (attempt {attempt}) for {address}: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(delay)
+        return 0.0
 
 
     async def get_price_mexc(self, session, u_id, max_sum=None, ):
@@ -629,7 +823,7 @@ async def main():
         abi =[{"inputs":[],"stateMutability":"nonpayable","type":"constructor"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount","type":"uint128"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"Burn","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":False,"internalType":"address","name":"recipient","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"amount1","type":"uint128"}],"name":"Collect","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"uint128","name":"amount0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"amount1","type":"uint128"}],"name":"CollectProtocol","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"paid0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"paid1","type":"uint256"}],"name":"Flash","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint16","name":"observationCardinalityNextOld","type":"uint16"},{"indexed":False,"internalType":"uint16","name":"observationCardinalityNextNew","type":"uint16"}],"name":"IncreaseObservationCardinalityNext","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"indexed":False,"internalType":"int24","name":"tick","type":"int24"}],"name":"Initialize","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount","type":"uint128"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"Mint","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint32","name":"feeProtocol0Old","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol1Old","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol0New","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol1New","type":"uint32"}],"name":"SetFeeProtocol","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"address","name":"addr","type":"address"}],"name":"SetLmPoolEvent","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"int256","name":"amount0","type":"int256"},{"indexed":False,"internalType":"int256","name":"amount1","type":"int256"},{"indexed":False,"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"indexed":False,"internalType":"uint128","name":"liquidity","type":"uint128"},{"indexed":False,"internalType":"int24","name":"tick","type":"int24"},{"indexed":False,"internalType":"uint128","name":"protocolFeesToken0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"protocolFeesToken1","type":"uint128"}],"name":"Swap","type":"event"},{"inputs":[{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount","type":"uint128"}],"name":"burn","outputs":[{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount0Requested","type":"uint128"},{"internalType":"uint128","name":"amount1Requested","type":"uint128"}],"name":"collect","outputs":[{"internalType":"uint128","name":"amount0","type":"uint128"},{"internalType":"uint128","name":"amount1","type":"uint128"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint128","name":"amount0Requested","type":"uint128"},{"internalType":"uint128","name":"amount1Requested","type":"uint128"}],"name":"collectProtocol","outputs":[{"internalType":"uint128","name":"amount0","type":"uint128"},{"internalType":"uint128","name":"amount1","type":"uint128"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"factory","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"fee","outputs":[{"internalType":"uint24","name":"","type":"uint24"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"feeGrowthGlobal0X128","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"feeGrowthGlobal1X128","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"flash","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"}],"name":"increaseObservationCardinalityNext","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"}],"name":"initialize","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"liquidity","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"lmPool","outputs":[{"internalType":"contract IPancakeV3LmPool","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"maxLiquidityPerTick","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount","type":"uint128"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"mint","outputs":[{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"observations","outputs":[{"internalType":"uint32","name":"blockTimestamp","type":"uint32"},{"internalType":"int56","name":"tickCumulative","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityCumulativeX128","type":"uint160"},{"internalType":"bool","name":"initialized","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint32[]","name":"secondsAgos","type":"uint32[]"}],"name":"observe","outputs":[{"internalType":"int56[]","name":"tickCumulatives","type":"int56[]"},{"internalType":"uint160[]","name":"secondsPerLiquidityCumulativeX128s","type":"uint160[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"positions","outputs":[{"internalType":"uint128","name":"liquidity","type":"uint128"},{"internalType":"uint256","name":"feeGrowthInside0LastX128","type":"uint256"},{"internalType":"uint256","name":"feeGrowthInside1LastX128","type":"uint256"},{"internalType":"uint128","name":"tokensOwed0","type":"uint128"},{"internalType":"uint128","name":"tokensOwed1","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"protocolFees","outputs":[{"internalType":"uint128","name":"token0","type":"uint128"},{"internalType":"uint128","name":"token1","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint32","name":"feeProtocol0","type":"uint32"},{"internalType":"uint32","name":"feeProtocol1","type":"uint32"}],"name":"setFeeProtocol","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_lmPool","type":"address"}],"name":"setLmPool","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"slot0","outputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"internalType":"int24","name":"tick","type":"int24"},{"internalType":"uint16","name":"observationIndex","type":"uint16"},{"internalType":"uint16","name":"observationCardinality","type":"uint16"},{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"},{"internalType":"uint32","name":"feeProtocol","type":"uint32"},{"internalType":"bool","name":"unlocked","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"}],"name":"snapshotCumulativesInside","outputs":[{"internalType":"int56","name":"tickCumulativeInside","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityInsideX128","type":"uint160"},{"internalType":"uint32","name":"secondsInside","type":"uint32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"bool","name":"zeroForOne","type":"bool"},{"internalType":"int256","name":"amountSpecified","type":"int256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"swap","outputs":[{"internalType":"int256","name":"amount0","type":"int256"},{"internalType":"int256","name":"amount1","type":"int256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"int16","name":"","type":"int16"}],"name":"tickBitmap","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"tickSpacing","outputs":[{"internalType":"int24","name":"","type":"int24"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"int24","name":"","type":"int24"}],"name":"ticks","outputs":[{"internalType":"uint128","name":"liquidityGross","type":"uint128"},{"internalType":"int128","name":"liquidityNet","type":"int128"},{"internalType":"uint256","name":"feeGrowthOutside0X128","type":"uint256"},{"internalType":"uint256","name":"feeGrowthOutside1X128","type":"uint256"},{"internalType":"int56","name":"tickCumulativeOutside","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityOutsideX128","type":"uint160"},{"internalType":"uint32","name":"secondsOutside","type":"uint32"},{"internalType":"bool","name":"initialized","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}]
         pair = 'EVAA/USDT'
         pank = OkxTrade(pair, "0x26deB24a2623Cf54452Ab5183E2C34551831D54d", abi,18, 3.174, "0x698fd17a5f9deca8a842d457f0a82edadced4175d4e498926d6f85f766973d42")
-        private_key = '0x698fd17a59fdeca8a842d457f0a82edadced4175d4e498926d6f85f766973d42'
+        private_key = '0x698fd17a5f9deca8a842d457f0a82edadced4175d4e498926d6f85f766973d42'
         arb = Arbitrage(mexc_client, pair, pank, private_key, "0xaa036928c9c0Df07d525B55ea8EE690Bb5a628C1")
         tasks = []
         await arb.update_balances()
@@ -637,7 +831,7 @@ async def main():
         # task2 = asyncio.create_task(arb.analyze_opportunities("WEB6166acce70c4090f1c096ff62f94a450bc5fbcd937ebd6bb6517efec1094c365"))
         # tasks.append(task2)
         # tasks.append(task1)
-        print(f'2013')
+        await mexc_client.close()
         # await asyncio.gather(task1, task2)
 
         # await asyncio.gather(*tasks)
