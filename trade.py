@@ -389,8 +389,6 @@ class Arbitrage:
                     timeout=5
                 )
                 return raw / (10 ** 18)
-            except asyncio.TimeoutError:
-                print(f"BNB balance timeout attempt {attempt}")
             except Exception as e:
                 print(f"RPC error in BNB (attempt {attempt}): {e}")
             if attempt < max_retries:
@@ -425,7 +423,8 @@ class Arbitrage:
 
         try:
             result = await mc.functions.aggregate(calls).call()
-            _, return_data_list = result
+            # _, return_data_list = result
+            return_data_list = result[1]
         except Exception as e:
             print(f"Multicall failed (with native) : {e}")
             # fallback
@@ -456,18 +455,21 @@ class Arbitrage:
                 balances[addr] = 0.0
 
         # парсим нативку (последний)
-        raw_native_bytes = return_data_list[len(token_addresses)]
-        try:
-            if isinstance(raw_native_bytes, str) and raw_native_bytes.startswith("0x"):
-                data_bytes = bytes.fromhex(raw_native_bytes[2:])
-            else:
-                data_bytes = raw_native_bytes
-            native_int = decode(['uint256'], data_bytes)[0]
-            native_balance = native_int / (10 ** 18)
-        except Exception as e:
-            print(f"Failed parse native balance: {e}")
-            native_balance = None
-
+        # raw_native_bytes = return_data_list[len(token_addresses)]
+        # try:
+        #     if isinstance(raw_native_bytes, str) and raw_native_bytes.startswith("0x"):
+        #         data_bytes = bytes.fromhex(raw_native_bytes[2:])
+        #     else:
+        #         data_bytes = raw_native_bytes
+        #     print(f'Nat: {data_bytes}\n\n{raw_native_bytes}\n{token_addresses}')
+        #     native_int = decode(['uint256'], data_bytes)[0]
+        #     print(f'Res nat: {native_int / (10 ** 18)}')
+        #     native_balance = native_int / (10 ** 18)
+        # except Exception as e:
+        #     print(f"Failed parse native balance: {e}")
+        #     native_balance = None
+        # Альтернатива: получить нативный баланс отдельным вызовом
+        native_balance = await self.w3.eth.get_balance(wallet_addr) / (10 ** 18)
         return balances, native_balance
 
     async def _safe_get_erc20_balance(self, address: str, decimals: int,
