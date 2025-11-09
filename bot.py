@@ -44,27 +44,43 @@ chat_id = 0
 # ОСНОВНЫЕ ОБРАБОТЧИКИ
 # =====================
 
+# @dp.message(Command("start"))
+# async def cmd_start(message: types.Message, state: FSMContext):
+#     global chat_id, arb_task, bot
+#     builder = ReplyKeyboardBuilder()
+#     builder.button(text="⚙️ Настройки")
+#     builder.button(text="🔄 Пары")
+#     builder.button(text="🆔 Обновить U_ID")
+#     builder.button(text="🚀 Запустить бота")
+#     builder.button(text="🛑 Остановить бота")
+#     builder.adjust(2, 2, 1)
+#     chat_id = message.chat.id
+#     if not db.get_uid():
+#         await message.answer("Укажите ваш U_ID:")
+#         await state.set_state(Form.UID_INPUT)
+#     else:
+#         await message.answer(
+#             "Добро пожаловать в Arbitrage Bot!\nВыберите действие:",
+#             reply_markup=builder.as_markup(resize_keyboard=True)
+#         )
+#         await state.set_state(Form.SETTINGS)
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    global chat_id, arb_task, bot
+    global chat_id
     builder = ReplyKeyboardBuilder()
     builder.button(text="⚙️ Настройки")
     builder.button(text="🔄 Пары")
-    builder.button(text="🆔 Обновить U_ID")
     builder.button(text="🚀 Запустить бота")
     builder.button(text="🛑 Остановить бота")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2)
     chat_id = message.chat.id
-    if not db.get_uid():
-        await message.answer("Укажите ваш U_ID:")
-        await state.set_state(Form.UID_INPUT)
-    else:
-        await message.answer(
-            "Добро пожаловать в Arbitrage Bot!\nВыберите действие:",
-            reply_markup=builder.as_markup(resize_keyboard=True)
-        )
-        await state.set_state(Form.SETTINGS)
 
+    await message.answer(
+        "Добро пожаловать в Arbitrage Bot!\nВыберите действие:",
+        reply_markup=builder.as_markup(resize_keyboard=True)
+    )
+    await state.set_state(Form.SETTINGS)
 
 @dp.message(Form.UID_INPUT)
 async def process_uid(message: types.Message, state: FSMContext):
@@ -105,19 +121,6 @@ async def start_arbitrage_bot(message: types.Message):
 @dp.message(Form.SETTINGS, F.text == "🛑 Остановить бота")
 async def stop_arbitrage_bot(message: types.Message):
     global arb_task
-    # if not arb_task:
-    #     return await message.answer("ℹ️ Бот не запущен")
-    # if arb_task.done():
-    #     arb_task = None
-    #     return await message.answer("ℹ️ Бот уже остановлен")
-    #
-    # arb_task.cancel()
-    # try:
-    #     await arb_task
-    # except asyncio.CancelledError:
-    #     # Это нормально — задача отменена
-    #     pass
-    # arb_task = None
     print(f'Lst: {active_arbitrage_instances}')
     pairs = db.get_all_pairs()
     for pair in pairs:
@@ -293,7 +296,7 @@ async def pairs_menu(message: types.Message, state: FSMContext):
     await state.set_state(Form.PAIRS_MENU)
 
 
-# Добавление пары
+# НОВАЯ цепочка добавления пары
 @dp.message(Form.PAIRS_MENU, F.text == "➕ Добавить пару")
 async def add_pair_name(message: types.Message, state: FSMContext):
     await message.answer(
@@ -306,75 +309,104 @@ async def add_pair_name(message: types.Message, state: FSMContext):
 @dp.message(Form.ADD_PAIR_NAME)
 async def process_pair_name(message: types.Message, state: FSMContext):
     pair = message.text.upper()
-    # if not pair.isalnum() or len(pair) < 5:
-    #     await message.answer("❌ Некорректный формат! Пример: BTCUSDT")
-    #     return
 
     # Проверяем, существует ли уже такая пара
-    if db.get_pair_contracts(pair):
+    if db.get_pair_data(pair):
         await message.answer(f"❌ Пара {pair} уже существует!")
         return await cmd_start(message, state)
 
     await state.update_data(new_pair=pair)
-
-    # Новое сообщение с инструкцией
-    await message.answer(
-        "Введите контракты через запятую в следующем порядке:\n\n"
-        "1. Ethereum контракт\n"
-        "2. Base контракт\n"
-        "3. BSC контракт\n\n"
-        "Пример: 0xaaa...,0xbbb...,0xccc...",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    await message.answer("Введите контракт пары в сети BSC:")
     await state.set_state(Form.ADD_PAIR_CONTRACT)
 
 
 @dp.message(Form.ADD_PAIR_CONTRACT)
 async def process_pair_contract(message: types.Message, state: FSMContext):
-    contracts_input = message.text.strip()
-    contracts = [c.strip() for c in contracts_input.split(',')]
+    contract = message.text.strip()
+    await state.update_data(contract_bsc=contract)
+    await message.answer("Введите decimals монеты (например: 18):")
+    await state.set_state(Form.ADD_PAIR_DECIMALS)
 
-    # Проверяем количество контрактов
-    if len(contracts) != 3:
-        await message.answer(
-            "❌ Ошибка! Должно быть ровно 3 контракта, разделенных запятыми.\n"
-            "Пожалуйста, введите снова:"
-        )
-        return
 
-    # Проверяем валидность контрактов (базовая проверка длины)
-    # if any(len(c) < 20 for c in contracts):
-    #     await message.answer(
-    #         "❌ Ошибка! Один или несколько контрактов выглядят невалидными.\n"
-    #         "Пожалуйста, проверьте и введите снова:"
-    #     )
-    #     return
+@dp.message(Form.ADD_PAIR_DECIMALS)
+async def process_pair_decimals(message: types.Message, state: FSMContext):
+    try:
+        decimals = int(message.text.strip())
+        await state.update_data(decimals=decimals)
+        await message.answer("Введите Api_key MEXC:")
+        await state.set_state(Form.ADD_PAIR_MEXC_API_KEY)
+    except ValueError:
+        await message.answer("❌ Ошибка! Введите целое число:")
 
+
+@dp.message(Form.ADD_PAIR_MEXC_API_KEY)
+async def process_mexc_api_key(message: types.Message, state: FSMContext):
+    api_key = message.text.strip()
+    await state.update_data(mexc_api_key=api_key)
+    await message.answer("Введите Api_secret MEXC:")
+    await state.set_state(Form.ADD_PAIR_MEXC_API_SECRET)
+
+
+@dp.message(Form.ADD_PAIR_MEXC_API_SECRET)
+async def process_mexc_api_secret(message: types.Message, state: FSMContext):
+    api_secret = message.text.strip()
+    await state.update_data(mexc_api_secret=api_secret)
+    await message.answer("Введите U_ID MEXC:")
+    await state.set_state(Form.ADD_PAIR_MEXC_UID)
+
+
+@dp.message(Form.ADD_PAIR_MEXC_UID)
+async def process_mexc_uid(message: types.Message, state: FSMContext):
+    mexc_uid = message.text.strip()
+    await state.update_data(mexc_uid=mexc_uid)
+    await message.answer("Введите private_key:")
+    await state.set_state(Form.ADD_PAIR_PRIVATE_KEY)
+
+
+@dp.message(Form.ADD_PAIR_PRIVATE_KEY)
+async def process_private_key(message: types.Message, state: FSMContext):
+    private_key = message.text.strip()
+    await state.update_data(private_key=private_key)
+    await message.answer("Введите RPC:")
+    await state.set_state(Form.ADD_PAIR_RPC)
+
+
+@dp.message(Form.ADD_PAIR_RPC)
+async def process_rpc(message: types.Message, state: FSMContext):
+    rpc = message.text.strip()
+    await state.update_data(rpc=rpc)
+    await message.answer("Введите Websocket:")
+    await state.set_state(Form.ADD_PAIR_WEBSOCKET)
+
+
+@dp.message(Form.ADD_PAIR_WEBSOCKET)
+async def process_websocket(message: types.Message, state: FSMContext):
+    websocket = message.text.strip()
     data = await state.get_data()
-    pair = data['new_pair']
 
-    # Сохраняем как кортеж (ethereum, base, bsc)
-    if db.add_pair(pair, (contracts[0], contracts[1], contracts[2])):
-        contracts_info = (
-            f"\n• Ethereum: `{contracts[0]}`"
-            f"\n• Base: `{contracts[1]}`"
-            f"\n• BSC: `{contracts[2]}`"
-        )
-        await message.answer(
-            f"✅ Пара *{pair}* добавлена! Контракты:" + contracts_info,
-            parse_mode="Markdown"
-        )
+    # Сохраняем пару со всеми данными
+    if db.add_pair_v2(
+            data['new_pair'],
+            data['contract_bsc'],
+            data['decimals'],
+            data['mexc_api_key'],
+            data['mexc_api_secret'],
+            data['mexc_uid'],
+            data['private_key'],
+            data['rpc'],
+            websocket
+    ):
+        await message.answer(f"✅ Пара *{data['new_pair']}* успешно добавлена!", parse_mode="Markdown")
     else:
-        await message.answer(f"❌ Ошибка при добавлении пары {pair}!")
+        await message.answer(f"❌ Ошибка при добавлении пары {data['new_pair']}!")
 
     await cmd_start(message, state)
 
 
-# Удаление пары
-# Инициация меню удаления
+# Обновленное удаление пары (остается практически без изменений)
 @dp.message(Form.PAIRS_MENU, F.text == "➖ Удалить пару")
 async def remove_pair_start(message: types.Message, state: FSMContext):
-    pairs = db.get_all_pairs()
+    pairs = db.get_all_pairs()  # Этот метод нужно обновить в database.py
     if not pairs:
         await message.answer("ℹ️ Нет пар для удаления")
         return await pairs_menu(message, state)
@@ -389,24 +421,37 @@ async def remove_pair_start(message: types.Message, state: FSMContext):
         "Выберите пару для удаления:",
         reply_markup=builder.as_markup(resize_keyboard=True)
     )
-    await state.set_state(Form.REMOVE_PAIR_SELECT)
 
+    await state.set_state(Form.REMOVE_PAIR_SELECT)
 
 @dp.message(Form.REMOVE_PAIR_SELECT, F.text == "🔙 Назад")
 async def remove_pair_back(message: types.Message, state: FSMContext):
     await state.clear()
     await cmd_start(message, state)
 
-
 @dp.message(Form.REMOVE_PAIR_SELECT)
 async def process_remove_pair(message: types.Message, state: FSMContext):
     pair = message.text.upper()
-    if db.remove_pair(pair):
+    if db.remove_pair_v2(pair):
         await message.answer(f"✅ Пара {pair} удалена!")
     else:
         await message.answer(f"❌ Пара {pair} не найдена или не удалена.")
     await state.clear()
     await cmd_start(message, state)
+
+
+
+
+#
+# @dp.message(Form.REMOVE_PAIR_SELECT)
+# async def process_remove_pair(message: types.Message, state: FSMContext):
+#     pair = message.text.upper()
+#     if db.remove_pair(pair):
+#         await message.answer(f"✅ Пара {pair} удалена!")
+#     else:
+#         await message.answer(f"❌ Пара {pair} не найдена или не удалена.")
+#     await state.clear()
+#     await cmd_start(message, state)
 
 
 # @dp.message(Form.__all_states__, F.text == "🔙 Назад")
