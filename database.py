@@ -7,16 +7,22 @@ class Database:
         self.db_name = db_name
         self._init_db()
 
+    # database.py - обновленная структура
     def _init_db(self):
         with closing(self._get_connection()) as conn:
-            # Обновленная таблица пар с раздельными контрактами
+            # НОВАЯ таблица пар с расширенными полями
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS pairs (
                     id INTEGER PRIMARY KEY,
                     name TEXT UNIQUE NOT NULL,
-                    contract_ethereum TEXT NOT NULL,
-                    contract_base TEXT NOT NULL,
-                    contract_bsc TEXT NOT NULL
+                    contract_bsc TEXT NOT NULL,
+                    decimals INTEGER NOT NULL,
+                    mexc_api_key TEXT NOT NULL,
+                    mexc_api_secret TEXT NOT NULL,
+                    mexc_uid TEXT NOT NULL,
+                    private_key TEXT NOT NULL,
+                    rpc TEXT NOT NULL,
+                    websocket TEXT NOT NULL
                 )
             ''')
 
@@ -35,34 +41,6 @@ class Database:
                     value REAL NOT NULL
                 )
             ''')
-            conn.execute('''
-                            CREATE TABLE IF NOT EXISTS uid (
-                                id INTEGER PRIMARY KEY,
-                                value TEXT NOT NULL,
-                                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                            )
-                        ''')
-            conn.execute('''
-                        CREATE TABLE IF NOT EXISTS settings (
-                            key TEXT PRIMARY KEY,
-                            value TEXT NOT NULL
-                        )
-                    ''')
-            conn.commit()
-
-            # Добавляем новый столбец, если он ещё не создан
-            try:
-                conn.execute("ALTER TABLE uid ADD COLUMN private_key_encrypted TEXT")
-                conn.commit()
-            except sqlite3.OperationalError as e:
-                # Если столбец уже есть — просто игнорируем ошибку
-                if "duplicate column name" not in str(e):
-                    raise
-
-            # Инициализация глобального спреда
-            if not conn.execute('SELECT 1 FROM global_spread').fetchone():
-                conn.execute('INSERT INTO global_spread (value) VALUES (1.0)')
-            conn.commit()
 
             # Инициализация глобального спреда
             if not conn.execute('SELECT 1 FROM global_spread').fetchone():
@@ -202,6 +180,53 @@ class Database:
         with closing(self._get_connection()) as conn:
             row = conn.execute('SELECT private_key_encrypted FROM uid LIMIT 1').fetchone()
             return row[0] if row else None
+
+    # database.py - новые методы
+    def add_pair_v2(self, name, contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc,
+                    websocket):
+        """Добавляет пару с новыми параметрами"""
+        with closing(self._get_connection()) as conn:
+            try:
+                conn.execute(
+                    '''INSERT INTO pairs 
+                    (name, contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (name.upper(), contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc,
+                     websocket)
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def get_pair_data(self, name):
+        """Возвращает все данные пары"""
+        with closing(self._get_connection()) as conn:
+            cursor = conn.execute(
+                '''SELECT contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket 
+                FROM pairs WHERE name = ?''',
+                (name.upper(),)
+            )
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'contract_bsc': result[0],
+                    'decimals': result[1],
+                    'mexc_api_key': result[2],
+                    'mexc_api_secret': result[3],
+                    'mexc_uid': result[4],
+                    'private_key': result[5],
+                    'rpc': result[6],
+                    'websocket': result[7]
+                }
+            return None
+
+    def remove_pair_v2(self, name):
+        """Удаляет пару"""
+        with closing(self._get_connection()) as conn:
+            cursor = conn.execute('DELETE FROM pairs WHERE name = ?', (name.upper(),))
+            conn.commit()
+            return cursor.rowcount > 0
 
 
 if __name__ == "__main__":
