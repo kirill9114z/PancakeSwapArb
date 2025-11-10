@@ -16,7 +16,7 @@ _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
 
 class OkxTrade:
-    def __init__(self, pair, address, abi, dec2, rak, private_key):
+    def __init__(self, pair, address, abi, dec2, rak, private_key, wss, rpc, db):
         self.pair = pair
         self.abi = abi
         self.address = address
@@ -24,9 +24,11 @@ class OkxTrade:
         self.decimals_out = dec2
         self.private_key = private_key
         self.rak = rak
-        self.ws_url = "wss://bnb-mainnet.g.alchemy.com/v2/HrpyTKu0jGPtMyZvD5iCV"
-        self.w3 = Web3(Web3.LegacyWebSocketProvider("wss://bnb-mainnet.g.alchemy.com/v2/HrpyTKu0jGPtMyZvD5iCV"))
-        self.rpc = AsyncWeb3(AsyncHTTPProvider(RPC_BSC))
+        self.ws_url = wss
+        # self.w3 = Web3(Web3.LegacyWebSocketProvider("wss://bnb-mainnet.g.alchemy.com/v2/HrpyTKu0jGPtMyZvD5iCV"))
+        self.w3 = Web3(Web3.LegacyWebSocketProvider(wss))
+        self.rpc = AsyncWeb3(AsyncHTTPProvider(rpc))
+        self.db = db
         self.account = self.rpc.eth.account.from_key(private_key)
         self.from_addr = Web3.to_checksum_address(self.account.address)
         self.router_addr = Web3.to_checksum_address("0x13f4EA83D0bd40E75C8222255bc855a974568Dd4")
@@ -126,7 +128,7 @@ class OkxTrade:
                 events = swap_filter.get_new_entries()
                 for e in events:
                     await self.handle_event(e, side)
-                # await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
             except Exception as exc:
                 print("Ошибка при получении новых записей:", exc)
 
