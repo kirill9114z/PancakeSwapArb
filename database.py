@@ -17,6 +17,8 @@ class Database:
                     name TEXT UNIQUE NOT NULL,
                     contract_bsc TEXT NOT NULL,
                     decimals INTEGER NOT NULL,
+                    address_contract TEXT NOT NULL,
+                    abi TEXT NOT NULL,
                     mexc_api_key TEXT NOT NULL,
                     mexc_api_secret TEXT NOT NULL,
                     mexc_uid TEXT NOT NULL,
@@ -182,17 +184,29 @@ class Database:
             return row[0] if row else None
 
     # database.py - новые методы
-    def add_pair_v2(self, name, contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc,
+    def add_pair_v2(self, name, contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid,
+                    private_key, rpc,
                     websocket):
         """Добавляет пару с новыми параметрами"""
         with closing(self._get_connection()) as conn:
             try:
                 conn.execute(
                     '''INSERT INTO pairs 
-                    (name, contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                    (name.upper(), contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc,
-                     websocket)
+                    (name, contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket) 
+                    VALUES (:name, :contract_bsc, :decimals, :address_contract, :abi, :mexc_api_key, :mexc_api_secret, :mexc_uid, :private_key, :rpc, :websocket)''',
+                    {
+                        'name': name.upper(),
+                        'contract_bsc': contract_bsc,
+                        'decimals': decimals,
+                        'address_contract': address_contract,
+                        'abi': abi,
+                        'mexc_api_key': mexc_api_key,
+                        'mexc_api_secret': mexc_api_secret,
+                        'mexc_uid': mexc_uid,
+                        'private_key': private_key,
+                        'rpc': rpc,
+                        'websocket': websocket
+                    }
                 )
                 conn.commit()
                 return True
@@ -203,7 +217,7 @@ class Database:
         """Возвращает все данные пары"""
         with closing(self._get_connection()) as conn:
             cursor = conn.execute(
-                '''SELECT contract_bsc, decimals, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket 
+                '''SELECT contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket 
                 FROM pairs WHERE name = ?''',
                 (name.upper(),)
             )
@@ -212,12 +226,14 @@ class Database:
                 return {
                     'contract_bsc': result[0],
                     'decimals': result[1],
-                    'mexc_api_key': result[2],
-                    'mexc_api_secret': result[3],
-                    'mexc_uid': result[4],
-                    'private_key': result[5],
-                    'rpc': result[6],
-                    'websocket': result[7]
+                    'address_contract': result[2],
+                    'abi': result[3],
+                    'mexc_api_key': result[4],
+                    'mexc_api_secret': result[5],
+                    'mexc_uid': result[6],
+                    'private_key': result[7],
+                    'rpc': result[8],
+                    'websocket': result[9]
                 }
             return None
 
@@ -231,4 +247,8 @@ class Database:
 
 if __name__ == "__main__":
     d = Database()
-    d.clear_database()
+    # d.clear_database()
+    # res1 = d.remove_pair_v2('EVAA/USDT')
+    # res2 = d.get_all_pairs()
+    res = d.get_pair_data('EVAA/USDT')
+    print(f'kak: {res}')
