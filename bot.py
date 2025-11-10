@@ -29,9 +29,18 @@ class Form(StatesGroup):
     PAIRS_MENU = State()
     ADD_PAIR_NAME = State()
     ADD_PAIR_CONTRACT = State()
+    ADD_PAIR_DECIMALS = State()
     REMOVE_PAIR_SELECT = State()
     UID_INPUT = State()
     PRIVATE_KEY_INPUT = State()
+    ADD_PAIR_MEXC_API_KEY = State()
+    ADD_PAIR_MEXC_API_SECRET = State()
+    ADD_PAIR_MEXC_UID = State()
+    ADD_PAIR_PRIVATE_KEY = State()
+    ADD_PAIR_RPC = State()
+    ADD_PAIR_WEBSOCKET = State()
+    ADD_PAIR_ADDRESS_CONTRACT = State()
+    ADD_PAIR_ABI_CONTRACT = State()
 
 
 bot_process = None
@@ -333,11 +342,32 @@ async def process_pair_decimals(message: types.Message, state: FSMContext):
     try:
         decimals = int(message.text.strip())
         await state.update_data(decimals=decimals)
-        await message.answer("Введите Api_key MEXC:")
-        await state.set_state(Form.ADD_PAIR_MEXC_API_KEY)
+        await message.answer("Введите адрес контракта:")
+        await state.set_state(Form.ADD_PAIR_ADDRESS_CONTRACT)
     except ValueError:
         await message.answer("❌ Ошибка! Введите целое число:")
 
+
+@dp.message(Form.ADD_PAIR_ADDRESS_CONTRACT)
+async def process_pair_addrcontract(message: types.Message, state: FSMContext):
+    try:
+        address_contract = message.text.strip()
+        await state.update_data(address_contract=address_contract)
+        await message.answer("Введите ABI контракта:")
+        await state.set_state(Form.ADD_PAIR_ABI_CONTRACT)
+    except ValueError:
+        await message.answer("❌ Ошибка! Введите правильное значение:")
+
+
+@dp.message(Form.ADD_PAIR_ABI_CONTRACT)
+async def process_pair_abi(message: types.Message, state: FSMContext):
+    try:
+        abi = message.text.strip()
+        await state.update_data(abi=abi)
+        await message.answer("Введите Api_key MEXC:")
+        await state.set_state(Form.ADD_PAIR_MEXC_API_KEY)
+    except ValueError:
+        await message.answer("❌ Ошибка! Введите правильное значение:")
 
 @dp.message(Form.ADD_PAIR_MEXC_API_KEY)
 async def process_mexc_api_key(message: types.Message, state: FSMContext):
@@ -383,12 +413,13 @@ async def process_rpc(message: types.Message, state: FSMContext):
 async def process_websocket(message: types.Message, state: FSMContext):
     websocket = message.text.strip()
     data = await state.get_data()
-
     # Сохраняем пару со всеми данными
     if db.add_pair_v2(
             data['new_pair'],
             data['contract_bsc'],
             data['decimals'],
+            data['address_contract'],
+            data['abi'],
             data['mexc_api_key'],
             data['mexc_api_secret'],
             data['mexc_uid'],
