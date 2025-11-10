@@ -20,7 +20,7 @@ USDC_CONTRACTS_2 = '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'
 cached = {}
 class Arbitrage:
     # def __init__(self, exchange, pair, pancakce, db, chat_id, bot, privat_key):
-    def __init__(self, exchange, pair, pancakce, privat_key, address):
+    def __init__(self, exchange, pair, pancakce, privat_key, address, rpc, bot, chat_id, db):
         self.exchange = exchange
         self.pair = pair
         self.address = address
@@ -28,7 +28,10 @@ class Arbitrage:
         self.private_key = privat_key
         self.owner = Account.from_key(self.private_key)
         # self.owner = Keypair.from_base58_string(self.private_key)
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_BSC))
+        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc))
+        self.bot = bot
+        self.chat_id = chat_id
+        self.db = db
 
         self.running = True
 
