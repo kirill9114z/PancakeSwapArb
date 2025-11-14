@@ -111,10 +111,11 @@ async def place_limit_order(
         amount: float,
         is_sell: bool,
         u_id,
+        session,
         timeout: float = 3.0
 ):
     t = time.time()
-    session = await get_session()
+    # session = await get_session()
     vcoin_id = await get_current_ids(symbol, session, u_id)
     if vcoin_id == False:
         return False
