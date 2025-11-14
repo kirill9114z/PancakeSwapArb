@@ -8,6 +8,7 @@ import logging
 import ccxt.async_support as ccxt
 from web3.middleware import ExtraDataToPOAMiddleware
 from config import API_KEY_MEXC, API_SECRET_MEXC, RPC_ETH, RPC_BSC, RPC_BASE
+from abi_contract import abi
 
 from pancake_trade import OkxTrade
 if sys.platform == 'win32':
@@ -28,12 +29,8 @@ async def monitor_pair(pair_name, db, chat_id, bot):
     # contracts = db.get_pair_contracts(pair_name)
 
     pair_data = db.get_pair_data(pair_name)
-    contracts = pair_data['contracts']
-    if not contracts:
-        logger.error(f"No contracts found for {pair_name}")
-        return
-    abi = pair_data['abi']
-    rak = 0
+    # abi = pair_data['abi']
+    rak = 1.623
     mexc_client = ccxt.mexc({
         'apiKey': pair_data['mexc_api_key'],
         'secret': pair_data['mexc_api_secret'],
@@ -41,24 +38,39 @@ async def monitor_pair(pair_name, db, chat_id, bot):
         'timeout': 30000
     })
     # def __init__(self, exchange, pair, pancakce, privat_key, address, rpc, bot, chat_id, db):
-    pancake = OkxTrade(pair_name, pair_data['address_contract'], abi, pair_data['decimals'], rak, pair_data["private_key"], pair_data["websocket"], pair_data['rpc'] ,db)
-    arbitrage = Arbitrage(mexc_client, pair_name, pancake, pair_data["private_key"], pair_data['contract_bsc'],pair_data["rpc"], chat_id, bot, db)
+    pancake = OkxTrade(pair_name, pair_data['address_contract'], pair_data['abi'], pair_data['decimals'], rak, pair_data["private_key"], pair_data["websocket"], pair_data['rpc'] ,db)
+    arbitrage = Arbitrage(mexc_client, pair_name, pancake, pair_data["private_key"], pair_data['contract_bsc'],pair_data["rpc"], bot, chat_id, db)
     active_arbitrage_instances[pair_name] = arbitrage
     arbitrage.running = True
-    pancake.run = True
+    pancake.running = True
     # Создаем экземпляр арбитражного бота для пары
     await asyncio.sleep(10)
     await arbitrage.update_balances()
     try:
+        tasks = []
         logger.info(f"We start analyzing to {pair_name}")
-        await arbitrage.analyze_opportunities()
+        task1 = asyncio.create_task(pancake.monitoring_price())
+        task2 = asyncio.create_task(arbitrage.analyze_opportunities())
+        tasks.append(task2)
+        tasks.append(task1)
+        await asyncio.gather(task1, task2)
     except Exception as e:
         logger.exception(f"Error monitoring {pair_name}: {str(e)}")
     finally:
         logger.info(f"Monitoring stopped for {pair_name}")
-        pancake.run = False
+        pancake.running = False
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
         if pair_name in active_arbitrage_instances:
             del active_arbitrage_instances[pair_name]
+
+
 
 
 async def main(chat_id, bot):
