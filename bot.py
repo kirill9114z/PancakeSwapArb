@@ -10,6 +10,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+import aiofiles
+import os
+from aiogram.types import ContentType
 from database import Database
 import asyncio
 from exchange import get_session
@@ -359,15 +362,80 @@ async def process_pair_addrcontract(message: types.Message, state: FSMContext):
         await message.answer("❌ Ошибка! Введите правильное значение:")
 
 
-@dp.message(Form.ADD_PAIR_ABI_CONTRACT)
+# @dp.message(Form.ADD_PAIR_ABI_CONTRACT)
+# async def process_pair_abi(message: types.Message, state: FSMContext):
+#     try:
+#         abi = message.text.strip()
+#         await state.update_data(abi=abi)
+#         await message.answer("Введите Api_key MEXC:")
+#         await state.set_state(Form.ADD_PAIR_MEXC_API_KEY)
+#     except ValueError:
+#         await message.answer("❌ Ошибка! Введите правильное значение:")
+
+@dp.message(Form.ADD_PAIR_ABI_CONTRACT, F.content_type.in_({ContentType.TEXT, ContentType.DOCUMENT}))
 async def process_pair_abi(message: types.Message, state: FSMContext):
     try:
-        abi = message.text.strip()
-        await state.update_data(abi=abi)
-        await message.answer("Введите Api_key MEXC:")
+        # Получаем название пары из состояния
+        data = await state.get_data()
+        pair_name = data.get('new_pair')
+
+        if not pair_name:
+            await message.answer("❌ Ошибка: название пары не найдено. Начните процесс добавления заново.")
+            await state.finish()
+            return
+
+        abi_content = ""
+
+        # Обрабатываем текстовое сообщение
+        if message.content_type == ContentType.TEXT:
+            abi_content = message.text.strip()
+
+        # Обрабатываем документ (файл)
+        elif message.content_type == ContentType.DOCUMENT:
+            # Проверяем, что это текстовый файл
+            if message.document.mime_type not in ['text/plain', 'application/json']:
+                await message.answer("❌ Пожалуйста, отправьте ABI в виде текстового файла (.txt или .json)")
+                return
+
+            # Скачиваем файл
+            file_id = message.document.file_id
+            file = await message.bot.get_file(file_id)
+            file_path = file.file_path
+
+            # Скачиваем и читаем файл
+            downloaded_file = await message.bot.download_file(file_path)
+            abi_content = downloaded_file.read().decode('utf-8')
+
+        # Проверяем, что ABI не пустой
+        if not abi_content:
+            await message.answer("❌ Получен пустой ABI. Пожалуйста, отправьте корректный ABI контракта.")
+            return
+
+        # Создаем имя файла для ABI (используем название пары)
+        # abi_filename = f"{pair_name}.json"
+        pair = pair_name.split('/')[0]
+        abi_filename = f"{pair}.json"
+        abi_folder = "pair_abi"
+        abi_filepath = os.path.join(abi_folder, abi_filename)
+
+        os.makedirs(abi_folder, exist_ok=True)
+
+        # Сохраняем ABI в файл
+        try:
+            async with aiofiles.open(abi_filepath, 'w', encoding='utf-8') as f:
+                await f.write(abi_content)
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сохранении файла ABI: {str(e)}")
+            return
+
+        # Сохраняем в состояние имя файла с ABI
+        await state.update_data(abi=abi_filename)
+
+        await message.answer("✅ ABI контракта успешно сохранен!\nВведите Api_key MEXC:")
         await state.set_state(Form.ADD_PAIR_MEXC_API_KEY)
-    except ValueError:
-        await message.answer("❌ Ошибка! Введите правильное значение:")
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при обработке ABI: {str(e)}")
 
 @dp.message(Form.ADD_PAIR_MEXC_API_KEY)
 async def process_mexc_api_key(message: types.Message, state: FSMContext):
