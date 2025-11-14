@@ -85,10 +85,14 @@ class Database:
             conn.execute('INSERT INTO uid (value) VALUES (?)', (uid_value,))
             conn.commit()
 
-    def get_uid(self):
+    def get_uid(self, name):
         """Получает текущий U_ID"""
         with closing(self._get_connection()) as conn:
-            cursor = conn.execute('SELECT value FROM uid LIMIT 1')
+            cursor = conn.execute(
+                '''SELECT mexc_uid 
+                FROM pairs WHERE name = ?''',
+                (name.upper(),)
+            )
             result = cursor.fetchone()
             return result[0] if result else None
 
@@ -250,5 +254,7 @@ if __name__ == "__main__":
     # d.clear_database()
     # res1 = d.remove_pair_v2('EVAA/USDT')
     # res2 = d.get_all_pairs()
-    res = d.get_pair_data('EVAA/USDT')
+    # res = d.get_pair_data('EVAA/USDT')
+    # res = d.get_uid('EVAA/USDT')
+    res = d.get_pair_spread("EVAA/USDT")
     print(f'kak: {res}')
