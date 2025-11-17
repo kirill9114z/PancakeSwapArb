@@ -44,6 +44,7 @@ class Form(StatesGroup):
     ADD_PAIR_WEBSOCKET = State()
     ADD_PAIR_ADDRESS_CONTRACT = State()
     ADD_PAIR_ABI_CONTRACT = State()
+    ADD_PAIR_MAX_VOL = State()
 
 
 bot_process = None
@@ -328,8 +329,20 @@ async def process_pair_name(message: types.Message, state: FSMContext):
         return await cmd_start(message, state)
 
     await state.update_data(new_pair=pair)
-    await message.answer("Введите контракт пары в сети BSC:")
-    await state.set_state(Form.ADD_PAIR_CONTRACT)
+    await message.answer("💵 Укажите максимальную сумму сделки в USDT:")
+    await state.set_state(Form.ADD_PAIR_MAX_VOL)
+
+
+@dp.message(Form.ADD_PAIR_MAX_VOL)
+async def process_pair_volume(message: types.Message, state: FSMContext):
+    try:
+        volume = int(message.text.strip())
+
+        await state.update_data(max_volume=volume)
+        await message.answer("Введите контракт токена в сети BSC:")
+        await state.set_state(Form.ADD_PAIR_CONTRACT)
+    except ValueError:
+        await message.answer("❌ Ошибка! Введите целое число:")
 
 
 @dp.message(Form.ADD_PAIR_CONTRACT)
@@ -345,7 +358,7 @@ async def process_pair_decimals(message: types.Message, state: FSMContext):
     try:
         decimals = int(message.text.strip())
         await state.update_data(decimals=decimals)
-        await message.answer("Введите адрес контракта:")
+        await message.answer("Введите адрес контракта пула:")
         await state.set_state(Form.ADD_PAIR_ADDRESS_CONTRACT)
     except ValueError:
         await message.answer("❌ Ошибка! Введите целое число:")
@@ -493,7 +506,8 @@ async def process_websocket(message: types.Message, state: FSMContext):
             data['mexc_uid'],
             data['private_key'],
             data['rpc'],
-            websocket
+            websocket,
+            data['max_volume']
     ):
         await message.answer(f"✅ Пара *{data['new_pair']}* успешно добавлена!", parse_mode="Markdown")
     else:
