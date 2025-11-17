@@ -24,7 +24,8 @@ class Database:
                     mexc_uid TEXT NOT NULL,
                     private_key TEXT NOT NULL,
                     rpc TEXT NOT NULL,
-                    websocket TEXT NOT NULL
+                    websocket TEXT NOT NULL,
+                    volume INTEGER NOT NULL
                 )
             ''')
 
@@ -190,14 +191,14 @@ class Database:
     # database.py - новые методы
     def add_pair_v2(self, name, contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid,
                     private_key, rpc,
-                    websocket):
+                    websocket, volume):
         """Добавляет пару с новыми параметрами"""
         with closing(self._get_connection()) as conn:
             try:
                 conn.execute(
                     '''INSERT INTO pairs 
-                    (name, contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket) 
-                    VALUES (:name, :contract_bsc, :decimals, :address_contract, :abi, :mexc_api_key, :mexc_api_secret, :mexc_uid, :private_key, :rpc, :websocket)''',
+                    (name, contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket, volume) 
+                    VALUES (:name, :contract_bsc, :decimals, :address_contract, :abi, :mexc_api_key, :mexc_api_secret, :mexc_uid, :private_key, :rpc, :websocket, :volume)''',
                     {
                         'name': name.upper(),
                         'contract_bsc': contract_bsc,
@@ -209,7 +210,8 @@ class Database:
                         'mexc_uid': mexc_uid,
                         'private_key': private_key,
                         'rpc': rpc,
-                        'websocket': websocket
+                        'websocket': websocket,
+                        'volume': volume
                     }
                 )
                 conn.commit()
@@ -221,7 +223,7 @@ class Database:
         """Возвращает все данные пары"""
         with closing(self._get_connection()) as conn:
             cursor = conn.execute(
-                '''SELECT contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket 
+                '''SELECT contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid, private_key, rpc, websocket, volume 
                 FROM pairs WHERE name = ?''',
                 (name.upper(),)
             )
@@ -237,7 +239,8 @@ class Database:
                     'mexc_uid': result[6],
                     'private_key': result[7],
                     'rpc': result[8],
-                    'websocket': result[9]
+                    'websocket': result[9],
+                    'volume': result[10]
                 }
             return None
 
@@ -254,7 +257,7 @@ if __name__ == "__main__":
     # d.clear_database()
     # res1 = d.remove_pair_v2('EVAA/USDT')
     # res2 = d.get_all_pairs()
-    # res = d.get_pair_data('EVAA/USDT')
+    res = d.get_pair_data('EVAA/USDT')
     # res = d.get_uid('EVAA/USDT')
-    res = d.get_pair_spread("EVAA/USDT")
+    # res = d.get_pair_spread("EVAA/USDT")
     print(f'kak: {res}')
