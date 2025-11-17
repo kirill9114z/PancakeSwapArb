@@ -39,7 +39,7 @@ async def monitor_pair(pair_name, db, chat_id, bot):
     })
     # def __init__(self, exchange, pair, pancakce, privat_key, address, rpc, bot, chat_id, db):
     pancake = OkxTrade(pair_name, pair_data['address_contract'], pair_data['abi'], pair_data['decimals'], rak, pair_data["private_key"], pair_data["websocket"], pair_data['rpc'] ,db)
-    arbitrage = Arbitrage(mexc_client, pair_name, pancake, pair_data["private_key"], pair_data['contract_bsc'],pair_data["rpc"], bot, chat_id, db)
+    arbitrage = Arbitrage(mexc_client, pair_name, pancake, pair_data["private_key"], pair_data['contract_bsc'],pair_data["rpc"], bot, chat_id, db, pair_data['volume'])
     active_arbitrage_instances[pair_name] = arbitrage
     arbitrage.running = True
     pancake.running = True
