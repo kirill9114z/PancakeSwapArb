@@ -20,7 +20,7 @@ USDC_CONTRACTS_2 = '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'
 cached = {}
 class Arbitrage:
     # def __init__(self, exchange, pair, pancakce, db, chat_id, bot, privat_key):
-    def __init__(self, exchange, pair, pancakce, privat_key, address, rpc, bot, chat_id, db):
+    def __init__(self, exchange, pair, pancakce, privat_key, address, rpc, bot, chat_id, db, max_volume):
         self.exchange = exchange
         self.pair = pair
         self.address = address
@@ -35,6 +35,7 @@ class Arbitrage:
 
         self.running = True
 
+        self.max_volume = max_volume
         self.balance_usdt_mexc = 200
         self.balance_token_mexc = 70
         self.balance_token_dex = 70
@@ -350,10 +351,10 @@ class Arbitrage:
 
     async def update_balances(self, stale_seconds: int = 3):
         try:
-            self.balance_usdt_mexc, self.balance_token_mexc = 200, 200
+            self.balance_usdt_mexc, self.balance_token_mexc = 1000, 800
             self.native_token = 0.1
-            self.balance_token_dex = 200
-            self.balance_usdc_dex_bsc = 200
+            self.balance_token_dex = 1000
+            self.balance_usdc_dex_bsc = 800
             return True
         except Exception as e:
             print(f"Failed to update balances: {e}")
@@ -497,7 +498,7 @@ class Arbitrage:
         return 0.0
 
 
-    async def get_price_mexc(self, session, max_sum=None, ):
+    async def get_price_mexc(self, session):
         # session = await get_session()
         u_id = self.db.get_uid(self.pair)
         if session is None:
@@ -541,8 +542,8 @@ class Arbitrage:
                 return None, None, None, None, None, None
             print(f'UNKNOWERROR get_price: {e} ')
             return None, None, None, None, None, None
-        ask_amounts, ask_costs, ask_avg = self.compute_prefix_stats_with_max_sum(ask, max_sum if max_sum is not None else self.balance_usdt_mexc)
-        bid_amounts, bid_costs, bid_avg = self.compute_prefix_stats_with_max_sum(bids, max_sum if max_sum is not None else self.balance_usdc_dex_bsc)
+        ask_amounts, ask_costs, ask_avg = self.compute_prefix_stats_with_max_sum(ask, self.max_volume if self.max_volume is not None else self.balance_usdt_mexc)
+        bid_amounts, bid_costs, bid_avg = self.compute_prefix_stats_with_max_sum(bids, self.max_volume if self.max_volume is not None else self.balance_usdc_dex_bsc)
         return ask_amounts, ask_costs, ask_avg, bid_amounts, bid_costs, bid_avg
 
 
@@ -566,7 +567,6 @@ class Arbitrage:
 
         spread = self.db.get_pair_spread(self.pair)
         curr_spread = spread if spread else self.db.get_global_spread()
-        print(f'Spread{self.pair}: {curr_spread}')
         try:
             while self.running == True:
                 t = time.time()
@@ -590,7 +590,7 @@ class Arbitrage:
 
                     # Рассчитываем прибыль
                     profit = (okx_effective_price - mexc_price) * volume
-                    if (float(volume) * float(mexc_price) <= self.balance_usdt_mexc) and float(volume) <= float(self.balance_token_dex):
+                    if (float(volume) * float(mexc_price) <= self.max_volume) and float(volume) <= float(self.balance_token_dex):
                         spread = ((okx_effective_price - mexc_price) / mexc_price) * 100
                         if float(spread) >= float(curr_spread):                  #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                             candidates.append({
@@ -619,7 +619,7 @@ class Arbitrage:
 
                     # Рассчитываем прибыль
                     profit = (mexc_price - okx_effective_price) * volume
-                    if (float(okx_buy_price) * float(volume) <= self.balance_usdc_dex_bsc) and (volume <= self.balance_token_mexc):
+                    if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
                         spread = ((mexc_price - okx_effective_price) / okx_effective_price) * 100
                         if float(spread) >= float(curr_spread):       #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                             candidates.append({
@@ -636,7 +636,7 @@ class Arbitrage:
 
                 if candidates:
                     best = max(candidates, key=lambda x: x['profit'])
-                    print(f'10: {best}')
+                    # print(f'10: {best}')
                     # fee = calculate_total_gas_cost(id3[best['chain_id']], cureent, best['volume'])
                     # best['profit'] = best['profit'] - fee
                     # print(f'1: {best}')
