@@ -49,7 +49,7 @@ class Arbitrage:
         self._withdrawal_fee_cache = {}
         self._cache_lock = asyncio.Lock()
 
-        self.PROFIT_THRESHOLD = 0.5
+        self.PROFIT_THRESHOLD = -0.5
         self.GLOBAL_SPREAD = -0.1
 
         self.last_alert = {}
@@ -356,10 +356,10 @@ class Arbitrage:
 
     async def update_balances(self):
         try:
-            self.balance_usdt_mexc, self.balance_token_mexc = 1000, 800
+            self.balance_usdt_mexc, self.balance_token_mexc = 100, 5
             self.native_token = 0.1
-            self.balance_token_dex = 1000
-            self.balance_usdc_dex_bsc = 800
+            self.balance_token_dex = 100
+            self.balance_usdc_dex_bsc = 5
             return True
         except Exception as e:
             print(f"Failed to update balances: {e}")
@@ -652,13 +652,13 @@ class Arbitrage:
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
                             print(f'BUY {best} | {fee}')
-                            await self.send_opportunity_alert(best)
-                            # await self.make_trade(best, session)
+                            # await self.send_opportunity_alert(best)
+                            await self.make_trade(best, session)
                     else:
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
                             print(f'SEll | {best} | {fee}')
-                            await self.send_opportunity_alert(best)
+                            # await self.send_opportunity_alert(best)
                             await self.make_trade(best, session)
                 else:
                     if okx_buy_price < 0.01:
@@ -674,11 +674,12 @@ class Arbitrage:
 
     async def make_trade(self, best, session):
         curr_pair = self.pair.split('/')
+        symbol = f"{curr_pair[0]}_{curr_pair[1]}"
         u_id = self.db.get_uid(self.pair)
         best['volume'] = 100
         try:
             if best['type'] == 'SELL_MEXC':
-                order = await place_limit_order(curr_pair, best['price'], best['volume'], True, u_id, session)
+                order = await place_limit_order(symbol, best['price'], best['volume'], True, u_id, session)
                 if order == False:
                     await self.send_notification('Скрипт остановлен, U_id токен устарел, нажмите настройки и поменяйте на новый')
                     self.running = False
@@ -688,10 +689,10 @@ class Arbitrage:
                     tim = time.time()
                     while True:
                         status = await self.exchange.fetch_order(order_id, self.pair)
-                        if time.time() - tim >= 3 and status['status'] == 'open' and status['filled'] == 0:
+                        if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] == 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             return
-                        if time.time() - tim >= 3 and status['status'] == 'open' and status['filled'] > 0:
+                        if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
                             if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
@@ -757,7 +758,7 @@ class Arbitrage:
                         await self.update_balances()
                         return
             else:
-                order = await place_limit_order(curr_pair, best["price"], best['volume'], False, u_id, session)
+                order = await place_limit_order(symbol, best["price"], best['volume'], False, u_id, session)
                 if order == False:
                     await self.send_notification(
                         'Скрипт остановлен, U_id токен устарел, нажмите настройки и поменяйте на новый')
@@ -837,39 +838,5 @@ class Arbitrage:
                         return
         except Exception as e:
             print(f'Error in make_trade: {e}')
+            await asyncio.sleep(1000)
 
-async def main():
-    global mexc_client
-    from config import  API_KEY_MEXC, API_SECRET_MEXC, PRIVATE_KEY
-    from database import Database
-    try:
-        mexc_client = ccxt.mexc({
-            'apiKey': API_KEY_MEXC,
-            'secret': API_SECRET_MEXC,  # НУЖНО БУДЕТ ИМПОРТИРОВАТЬ ИЗ КОНФИГА АПИ_КЕЙ И АПИСИКРЕТ
-            'enableRateLimit': True,
-            'timeout': 30000
-        })
-        db = Database()
-        rpc = "https://bnb-mainnet.g.alchemy.com/v2/aedh6t876rEucrZvxICcO"
-        wss = 'wss://bnb-mainnet.g.alchemy.com/v2/HrpyTKu0jGPtMyZvD5iCV'
-        abi =[{"inputs":[],"stateMutability":"nonpayable","type":"constructor"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount","type":"uint128"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"Burn","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":False,"internalType":"address","name":"recipient","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"amount1","type":"uint128"}],"name":"Collect","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"uint128","name":"amount0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"amount1","type":"uint128"}],"name":"CollectProtocol","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"paid0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"paid1","type":"uint256"}],"name":"Flash","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint16","name":"observationCardinalityNextOld","type":"uint16"},{"indexed":False,"internalType":"uint16","name":"observationCardinalityNextNew","type":"uint16"}],"name":"IncreaseObservationCardinalityNext","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"indexed":False,"internalType":"int24","name":"tick","type":"int24"}],"name":"Initialize","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"owner","type":"address"},{"indexed":True,"internalType":"int24","name":"tickLower","type":"int24"},{"indexed":True,"internalType":"int24","name":"tickUpper","type":"int24"},{"indexed":False,"internalType":"uint128","name":"amount","type":"uint128"},{"indexed":False,"internalType":"uint256","name":"amount0","type":"uint256"},{"indexed":False,"internalType":"uint256","name":"amount1","type":"uint256"}],"name":"Mint","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"uint32","name":"feeProtocol0Old","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol1Old","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol0New","type":"uint32"},{"indexed":False,"internalType":"uint32","name":"feeProtocol1New","type":"uint32"}],"name":"SetFeeProtocol","type":"event"},{"anonymous":False,"inputs":[{"indexed":False,"internalType":"address","name":"addr","type":"address"}],"name":"SetLmPoolEvent","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"internalType":"address","name":"sender","type":"address"},{"indexed":True,"internalType":"address","name":"recipient","type":"address"},{"indexed":False,"internalType":"int256","name":"amount0","type":"int256"},{"indexed":False,"internalType":"int256","name":"amount1","type":"int256"},{"indexed":False,"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"indexed":False,"internalType":"uint128","name":"liquidity","type":"uint128"},{"indexed":False,"internalType":"int24","name":"tick","type":"int24"},{"indexed":False,"internalType":"uint128","name":"protocolFeesToken0","type":"uint128"},{"indexed":False,"internalType":"uint128","name":"protocolFeesToken1","type":"uint128"}],"name":"Swap","type":"event"},{"inputs":[{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount","type":"uint128"}],"name":"burn","outputs":[{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount0Requested","type":"uint128"},{"internalType":"uint128","name":"amount1Requested","type":"uint128"}],"name":"collect","outputs":[{"internalType":"uint128","name":"amount0","type":"uint128"},{"internalType":"uint128","name":"amount1","type":"uint128"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint128","name":"amount0Requested","type":"uint128"},{"internalType":"uint128","name":"amount1Requested","type":"uint128"}],"name":"collectProtocol","outputs":[{"internalType":"uint128","name":"amount0","type":"uint128"},{"internalType":"uint128","name":"amount1","type":"uint128"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"factory","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"fee","outputs":[{"internalType":"uint24","name":"","type":"uint24"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"feeGrowthGlobal0X128","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"feeGrowthGlobal1X128","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"flash","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"}],"name":"increaseObservationCardinalityNext","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"}],"name":"initialize","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"liquidity","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"lmPool","outputs":[{"internalType":"contract IPancakeV3LmPool","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"maxLiquidityPerTick","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"},{"internalType":"uint128","name":"amount","type":"uint128"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"mint","outputs":[{"internalType":"uint256","name":"amount0","type":"uint256"},{"internalType":"uint256","name":"amount1","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"observations","outputs":[{"internalType":"uint32","name":"blockTimestamp","type":"uint32"},{"internalType":"int56","name":"tickCumulative","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityCumulativeX128","type":"uint160"},{"internalType":"bool","name":"initialized","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint32[]","name":"secondsAgos","type":"uint32[]"}],"name":"observe","outputs":[{"internalType":"int56[]","name":"tickCumulatives","type":"int56[]"},{"internalType":"uint160[]","name":"secondsPerLiquidityCumulativeX128s","type":"uint160[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"positions","outputs":[{"internalType":"uint128","name":"liquidity","type":"uint128"},{"internalType":"uint256","name":"feeGrowthInside0LastX128","type":"uint256"},{"internalType":"uint256","name":"feeGrowthInside1LastX128","type":"uint256"},{"internalType":"uint128","name":"tokensOwed0","type":"uint128"},{"internalType":"uint128","name":"tokensOwed1","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"protocolFees","outputs":[{"internalType":"uint128","name":"token0","type":"uint128"},{"internalType":"uint128","name":"token1","type":"uint128"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint32","name":"feeProtocol0","type":"uint32"},{"internalType":"uint32","name":"feeProtocol1","type":"uint32"}],"name":"setFeeProtocol","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"_lmPool","type":"address"}],"name":"setLmPool","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"slot0","outputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"internalType":"int24","name":"tick","type":"int24"},{"internalType":"uint16","name":"observationIndex","type":"uint16"},{"internalType":"uint16","name":"observationCardinality","type":"uint16"},{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"},{"internalType":"uint32","name":"feeProtocol","type":"uint32"},{"internalType":"bool","name":"unlocked","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"int24","name":"tickLower","type":"int24"},{"internalType":"int24","name":"tickUpper","type":"int24"}],"name":"snapshotCumulativesInside","outputs":[{"internalType":"int56","name":"tickCumulativeInside","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityInsideX128","type":"uint160"},{"internalType":"uint32","name":"secondsInside","type":"uint32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"bool","name":"zeroForOne","type":"bool"},{"internalType":"int256","name":"amountSpecified","type":"int256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"},{"internalType":"bytes","name":"data","type":"bytes"}],"name":"swap","outputs":[{"internalType":"int256","name":"amount0","type":"int256"},{"internalType":"int256","name":"amount1","type":"int256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"int16","name":"","type":"int16"}],"name":"tickBitmap","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"tickSpacing","outputs":[{"internalType":"int24","name":"","type":"int24"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"int24","name":"","type":"int24"}],"name":"ticks","outputs":[{"internalType":"uint128","name":"liquidityGross","type":"uint128"},{"internalType":"int128","name":"liquidityNet","type":"int128"},{"internalType":"uint256","name":"feeGrowthOutside0X128","type":"uint256"},{"internalType":"uint256","name":"feeGrowthOutside1X128","type":"uint256"},{"internalType":"int56","name":"tickCumulativeOutside","type":"int56"},{"internalType":"uint160","name":"secondsPerLiquidityOutsideX128","type":"uint160"},{"internalType":"uint32","name":"secondsOutside","type":"uint32"},{"internalType":"bool","name":"initialized","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}]
-        pair = 'EVAA/USDT'
-        pank = OkxTrade(pair, "0x26deB24a2623Cf54452Ab5183E2C34551831D54d", abi,18, 3.174, PRIVATE_KEY, wss, rpc, db)
-        private_key = PRIVATE_KEY
-        arb = Arbitrage(mexc_client, pair, pank, private_key, "0xaa036928c9c0Df07d525B55ea8EE690Bb5a628C1")
-        tasks = []
-        await arb.update_balances()
-        # task1 = asyncio.create_task(pank.monitoring_price())
-        # task2 = asyncio.create_task(arb.analyze_opportunities("WEB6166acce70c4090f1c096ff62f94a450bc5fbcd937ebd6bb6517efec1094c365"))
-        # tasks.append(task2)
-        # tasks.append(task1)
-        await mexc_client.close()
-        # await asyncio.gather(task1, task2)
-
-        # await asyncio.gather(*tasks)
-    except Exception as e:
-        print(f'100000: {e}')
-        await mexc_client.close()
-
-if __name__ == '__main__':
-    asyncio.run(main())
