@@ -252,6 +252,40 @@ class Database:
             return cursor.rowcount > 0
 
 
+
+    def update_pair_mexc_uid(self, pair_name: str, new_uid: str) -> bool:
+        with closing(self._get_connection()) as conn:
+            try:
+                # Проверяем существование пары
+                cursor = conn.execute(
+                    'SELECT id FROM pairs WHERE name = ?',
+                    (pair_name.upper(),)
+                )
+                result = cursor.fetchone()
+
+                if not result:
+                    print(f"Пара '{pair_name}' не найдена в базе данных")
+                    return False
+
+                # Обновляем только mexc_uid
+                cursor = conn.execute(
+                    'UPDATE pairs SET mexc_uid = ? WHERE name = ?',
+                    (new_uid, pair_name.upper())
+                )
+
+                if cursor.rowcount == 0:
+                    print(f"Не удалось обновить U_ID для пары '{pair_name}'")
+                    return False
+
+                conn.commit()
+                print(f"✅ U_ID успешно обновлен для пары '{pair_name}': {new_uid}")
+                return True
+
+            except sqlite3.Error as e:
+                print(f"Ошибка базы данных при обновлении U_ID для '{pair_name}': {e}")
+                return False
+
+
 if __name__ == "__main__":
     d = Database()
     # d.clear_database()
