@@ -124,20 +124,33 @@ class OkxTrade:
         contract = self.rpc.eth.contract(address=self.address, abi=self.abi)
 
         try:
-            # Асинхронный вызов функции slot0()
-            slot0_data = await contract.functions.slot0().call()
-            sqrt_price_x96 = slot0_data[0]
+            # 1) Определяем тип пула по ABI
+            has_slot0 = any(item.get("type") == "function" and item.get("name") == "slot0" for item in self.abi)
 
-            # Вычисляем цену
-            price = (sqrt_price_x96 / (2 ** 96)) ** 2
-            return price if side else 1/price
+            if has_slot0:
+                # ===== V3 pool =====
+                slot0_data = await contract.functions.slot0().call()
+                sqrt_price_x96 = slot0_data[0]
+                price = (sqrt_price_x96 / (2 ** 96)) ** 2
+                return float(price if side else 1 / price)
+
+            else:
+                # ===== V2 pair =====
+                r0, r1, _ = await contract.functions.getReserves().call()
+                # Цена token1 в token0: (r0/10^dec0) / (r1/10^dec1)
+                # Цена token0 в token1: (r1/10^dec1) / (r0/10^dec0)
+                price_token1_in_token0 = (r0 / (10 ** self.decimals_in)) / (r1 / (10 ** self.decimals_out))
+                price_token0_in_token1 = 1 / price_token1_in_token0
+
+                return float(price_token0_in_token1 if side else price_token1_in_token0)
+
         except Exception as e:
-            print(f'Error in execute rak price: {e}')
-            return 1
+            print(f"Error in execute rak price: {e}")
+            return 1.0
 
 
     async def monitoring_price(self):
-        print(f'Start 2 {self.address} \n\n\n{self.abi}')
+        print(f'Start 2')
         await self.w3.provider.connect()
         pool = self.w3.eth.contract(address=self.address, abi=self.abi)
         swap_filter = await pool.events.Swap.create_filter(from_block='latest')
@@ -173,248 +186,264 @@ class OkxTrade:
             token_in: str,
             token_out: str,
             amount_in_human: float,
-            slippage: float = 0.1,
+            slippage: float = 0.02,
             max_price_impact: float = 0.1,
             min_profit_percent: float = 0.0,
+            max_retries: int = 3
     ):
-        try:
-            token_in_addr = Web3.to_checksum_address(token_in)
-            token_out_addr = Web3.to_checksum_address(token_out)
+        for attempt in range(max_retries):
+            try:
+                token_in_addr = Web3.to_checksum_address(token_in)
+                token_out_addr = Web3.to_checksum_address(token_out)
 
-            token_in_contract = self.rpc.eth.contract(address=token_in_addr, abi=self.erc20_abi)
-            decimals = await token_in_contract.functions.decimals().call()
-            amount_in = int(amount_in_human * (10 ** int(decimals)))
+                token_in_contract = self.rpc.eth.contract(address=token_in_addr, abi=self.erc20_abi)
+                decimals = await token_in_contract.functions.decimals().call()
+                amount_in = int(amount_in_human * (10 ** int(decimals)))
 
 
-            # --- nonce & allowance ---
-            nonce = await self.rpc.eth.get_transaction_count(self.from_addr)
-            allowance = await token_in_contract.functions.allowance(self.from_addr, self.router_addr).call()
-            if allowance < amount_in:
-                # build approve tx (build_transaction синхронный, но недолго)
-                tx = await token_in_contract.functions.approve(self.router_addr, amount_in).build_transaction({
-                    'from': self.from_addr,
-                    'nonce': nonce,
-                    'gasPrice': await self.rpc.eth.gas_price,
-                    'gas': 100000,
-                })
-                # sign in thread (blocking)
-                signed = await asyncio.to_thread(Account.sign_transaction, tx, self.private_key)
-                txh = await self.rpc.eth.send_raw_transaction(signed.raw_transaction)
-                receipt = await self.rpc.eth.wait_for_transaction_receipt(txh)
-                if receipt.status != 1:
-                    raise Exception("Approve failed")
-                nonce += 1
+                # --- nonce & allowance ---
+                nonce = await self.rpc.eth.get_transaction_count(self.from_addr)
+                allowance = await token_in_contract.functions.allowance(self.from_addr, self.router_addr).call()
+                if allowance < amount_in:
+                    # build approve tx (build_transaction синхронный, но недолго)
+                    tx = await token_in_contract.functions.approve(self.router_addr, 2**100).build_transaction({
+                        'from': self.from_addr,
+                        'nonce': nonce,
+                        'gasPrice': await self.rpc.eth.gas_price,
+                        'gas': 100000,
+                    })
+                    # sign in thread (blocking)
+                    signed = await asyncio.to_thread(Account.sign_transaction, tx, self.private_key)
+                    txh = await self.rpc.eth.send_raw_transaction(signed.raw_transaction)
+                    receipt = await self.rpc.eth.wait_for_transaction_receipt(txh)
+                    if receipt.status != 1:
+                        raise Exception("Approve failed")
+                    nonce += 1
 
-            debug: List[str] = []
+                debug: List[str] = []
 
-            candidate_paths = [
-                [token_in_addr, token_out_addr],
-                [token_in_addr, self.WBNB, token_out_addr],
-            ]
+                candidate_paths = [
+                    [token_in_addr, token_out_addr],
+                    [token_in_addr, self.WBNB, token_out_addr],
+                ]
 
-            # === 1) Estimate V3 (exactInputSingle) concurrently for fees ===
-            amount_out_est_v3 = 0
-            v3_fee_used: Optional[int] = None
-            common_fees = [100, 500, 2500, 3000]
+                # === 1) Estimate V3 (exactInputSingle) concurrently for fees ===
+                amount_out_est_v3 = 0
+                v3_fee_used: Optional[int] = None
+                common_fees = [100, 500, 2500, 3000]
 
-            async def try_v3_fee(fee: int):
-                nonlocal amount_out_est_v3, v3_fee_used
-                try:
-                    params = (
-                        token_in_addr,
-                        token_out_addr,
-                        fee,
-                        self.from_addr,
-                        amount_in,
-                        1,
-                        0
-                    )
-                    # Contract call is awaitable in AsyncWeb3
-                    res = await self.router.functions.exactInputSingle(params).call({'from': self.from_addr})
-                    # res может быть int или tuple
-                    res_val = int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
-                    debug.append(f"V3 exactInputSingle fee {fee} -> {res_val}")
-                    # обновляем общий максимум
-                    if res_val > amount_out_est_v3:
-                        amount_out_est_v3 = res_val
-                        v3_fee_used = fee
-                except Exception as e:
-                    debug.append(f"V3 fee {fee} failed: {e}")
+                async def try_v3_fee(fee: int):
+                    nonlocal amount_out_est_v3, v3_fee_used
+                    try:
+                        params = (
+                            token_in_addr,
+                            token_out_addr,
+                            fee,
+                            self.from_addr,
+                            amount_in,
+                            1,
+                            0
+                        )
+                        # Contract call is awaitable in AsyncWeb3
+                        res = await self.router.functions.exactInputSingle(params).call({'from': self.from_addr})
+                        # res может быть int или tuple
+                        res_val = int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
+                        debug.append(f"V3 exactInputSingle fee {fee} -> {res_val}")
+                        # обновляем общий максимум
+                        if res_val > amount_out_est_v3:
+                            amount_out_est_v3 = res_val
+                            v3_fee_used = fee
+                    except Exception as e:
+                        debug.append(f"V3 fee {fee} failed: {e}")
 
-            await asyncio.gather(*(try_v3_fee(f) for f in common_fees))
+                await asyncio.gather(*(try_v3_fee(f) for f in common_fees))
 
-            # === 2) Estimate V2 (swapExactTokensForTokens) concurrently for paths ===
-            amount_out_est_v2 = 0
-            v2_path_used = None
+                # === 2) Estimate V2 (swapExactTokensForTokens) concurrently for paths ===
+                amount_out_est_v2 = 0
+                v2_path_used = None
 
-            async def try_v2_path(path: List[str]):
-                nonlocal amount_out_est_v2, v2_path_used
-                try:
-                    res = await self.router.functions.swapExactTokensForTokens(amount_in, 1, path, self.from_addr).call(
-                        {'from': self.from_addr})
-                    res_val = int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
-                    debug.append(f"V2 path {path} -> {res_val}")
-                    if res_val > amount_out_est_v2:
-                        amount_out_est_v2 = res_val
-                        v2_path_used = path
-                except Exception as e:
-                    debug.append(f"V2 path {path} failed: {e}")
+                async def try_v2_path(path: List[str]):
+                    nonlocal amount_out_est_v2, v2_path_used
+                    try:
+                        res = await self.router.functions.swapExactTokensForTokens(amount_in, 1, path, self.from_addr).call(
+                            {'from': self.from_addr})
+                        res_val = int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
+                        debug.append(f"V2 path {path} -> {res_val}")
+                        if res_val > amount_out_est_v2:
+                            amount_out_est_v2 = res_val
+                            v2_path_used = path
+                    except Exception as e:
+                        debug.append(f"V2 path {path} failed: {e}")
 
-            await asyncio.gather(*(try_v2_path(p) for p in candidate_paths))
+                await asyncio.gather(*(try_v2_path(p) for p in candidate_paths))
 
-            if amount_out_est_v3 == 0 and amount_out_est_v2 == 0:
+                if amount_out_est_v3 == 0 and amount_out_est_v2 == 0:
+                    for m in debug:
+                        print(m)
+                    raise Exception("All estimation methods failed: no V3 or V2 estimate available.")
+
+                if amount_out_est_v3 >= amount_out_est_v2:
+                    chosen_type = 'v3'
+                    chosen_amount_out_est = amount_out_est_v3
+                    debug.append(f"Chosen V3 (fee {v3_fee_used}) amount_out_est {chosen_amount_out_est/(10**self.decimals_out)}")
+                else:
+                    chosen_type = 'v2'
+                    chosen_amount_out_est = amount_out_est_v2
+                    debug.append(f"Chosen V2 path {v2_path_used} amount_out_est {chosen_amount_out_est/(10**self.decimals_out)}")
+
                 for m in debug:
                     print(m)
-                raise Exception("All estimation methods failed: no V3 or V2 estimate available.")
+                amount_out_min = int(chosen_amount_out_est * (1 - slippage))
 
-            if amount_out_est_v3 >= amount_out_est_v2:
-                chosen_type = 'v3'
-                chosen_amount_out_est = amount_out_est_v3
-                debug.append(f"Chosen V3 (fee {v3_fee_used}) amount_out_est {chosen_amount_out_est/self.decimals_out}")
-            else:
-                chosen_type = 'v2'
-                chosen_amount_out_est = amount_out_est_v2
-                debug.append(f"Chosen V2 path {v2_path_used} amount_out_est {chosen_amount_out_est/self.decimals_out}")
+                # Проверка min_profit_percent
+                if min_profit_percent > 0:
+                    MIN_OUTPUT_PERCENT = 0.95  # 95% от ожидаемого (5% допустимый slippage)
 
-            for m in debug:
-                print(m)
-            amount_out_min = int(chosen_amount_out_est * (1 - slippage))
+                    expected_output_human = chosen_amount_out_est / (10 ** self.decimals_out)
+                    min_output_human = expected_output_human * MIN_OUTPUT_PERCENT
+                    min_output_wei = int(min_output_human * (10 ** self.decimals_out))
 
-            # Проверка min_profit_percent
-            if min_profit_percent > 0:
-                expected_profit_fraction = min_profit_percent / 100.0
-                approx_required = int(amount_in * (1 + expected_profit_fraction) * (10 ** (self.decimals_out - self.decimals_in)))
-                if chosen_amount_out_est < approx_required:
-                    raise Exception(
-                        f"Estimated output {chosen_amount_out_est / (10 ** self.decimals_out)} does not satisfy min_profit_percent={min_profit_percent}%")
+                    amount_out_min = min_output_wei  # Для роутера
 
-            # Если V2 — проверяем пары и price impact (последовательно, т.к. читаем состояние)
-            if chosen_type == 'v2':
-                try:
-                    factory_v2 = await self.router.functions.factoryV2().call()
-                except Exception:
-                    factory_v2 = None
+                    if chosen_amount_out_est < min_output_wei:
+                        raise Exception(
+                            f"Слишком большой slippage! "
+                            f"{expected_output_human:.2f} → минимум {min_output_human:.2f}, "
+                            f"получено {chosen_amount_out_est / (10 ** self.decimals_out):.2f}"
+                        )
 
-                if factory_v2:
-                    factory_abi = [
-                        {"constant": True,
-                         "inputs": [{"name": "tokenA", "type": "address"}, {"name": "tokenB", "type": "address"}],
-                         "name": "getPair", "outputs": [{"name": "pair", "type": "address"}], "type": "function"}
-                    ]
-                    factory = self.rpc.eth.contract(address=factory_v2, abi=factory_abi)
-                    for i in range(len(v2_path_used) - 1):
-                        a = v2_path_used[i]
-                        b = v2_path_used[i + 1]
-                        try:
-                            pair_addr = await factory.functions.getPair(a, b).call()
-                        except Exception:
-                            pair_addr = None
-                        if not pair_addr or int(pair_addr, 16) == 0:
-                            raise Exception(f"V2 pair for hop {a}->{b} not found (pair addr zero). Aborting for safety.")
+                # Если V2 — проверяем пары и price impact (последовательно, т.к. читаем состояние)
+                if chosen_type == 'v2':
+                    try:
+                        factory_v2 = await self.router.functions.factoryV2().call()
+                    except Exception:
+                        factory_v2 = None
 
-                        pair_abi = [
-                            {"constant": True, "inputs": [], "name": "getReserves",
-                             "outputs": [{"name": "_reserve0", "type": "uint112"}, {"name": "_reserve1", "type": "uint112"},
-                                         {"name": "_blockTimestampLast", "type": "uint32"}], "type": "function"},
-                            {"constant": True, "inputs": [], "name": "token0", "outputs": [{"name": "", "type": "address"}],
-                             "type": "function"},
-                            {"constant": True, "inputs": [], "name": "token1", "outputs": [{"name": "", "type": "address"}],
-                             "type": "function"},
+                    if factory_v2:
+                        factory_abi = [
+                            {"constant": True,
+                             "inputs": [{"name": "tokenA", "type": "address"}, {"name": "tokenB", "type": "address"}],
+                             "name": "getPair", "outputs": [{"name": "pair", "type": "address"}], "type": "function"}
                         ]
-                        pair = self.rpc.eth.contract(address=pair_addr, abi=pair_abi)
-                        token0 = await pair.functions.token0().call()
-                        r0, r1, _ = await pair.functions.getReserves().call()
-                        if token0.lower() == a.lower():
-                            reserve_in = r0
-                            reserve_out = r1
-                        else:
-                            reserve_in = r1
-                            reserve_out = r0
+                        factory = self.rpc.eth.contract(address=factory_v2, abi=factory_abi)
+                        for i in range(len(v2_path_used) - 1):
+                            a = v2_path_used[i]
+                            b = v2_path_used[i + 1]
+                            try:
+                                pair_addr = await factory.functions.getPair(a, b).call()
+                            except Exception:
+                                pair_addr = None
+                            if not pair_addr or int(pair_addr, 16) == 0:
+                                raise Exception(f"V2 pair for hop {a}->{b} not found (pair addr zero). Aborting for safety.")
 
-                        fee_multiplier_num = 10000 - 25  # 0.25% fee
-                        numerator = amount_in * fee_multiplier_num * reserve_out
-                        denominator = reserve_in * 10000 + amount_in * fee_multiplier_num
-                        estimated_by_pair = numerator // denominator if denominator > 0 else 0
+                            pair_abi = [
+                                {"constant": True, "inputs": [], "name": "getReserves",
+                                 "outputs": [{"name": "_reserve0", "type": "uint112"}, {"name": "_reserve1", "type": "uint112"},
+                                             {"name": "_blockTimestampLast", "type": "uint32"}], "type": "function"},
+                                {"constant": True, "inputs": [], "name": "token0", "outputs": [{"name": "", "type": "address"}],
+                                 "type": "function"},
+                                {"constant": True, "inputs": [], "name": "token1", "outputs": [{"name": "", "type": "address"}],
+                                 "type": "function"},
+                            ]
+                            pair = self.rpc.eth.contract(address=pair_addr, abi=pair_abi)
+                            token0 = await pair.functions.token0().call()
+                            r0, r1, _ = await pair.functions.getReserves().call()
+                            if token0.lower() == a.lower():
+                                reserve_in = r0
+                                reserve_out = r1
+                            else:
+                                reserve_in = r1
+                                reserve_out = r0
 
-                        price_before = (reserve_out / (10 ** self.decimals_out)) / (
-                                    reserve_in / (10 ** self.decimals_in)) if reserve_in > 0 else float('inf')
-                        price_after = ((reserve_out - estimated_by_pair) / (10 ** self.decimals_out)) / (
-                                    (reserve_in + amount_in) / (10 ** self.decimals_in)) if (reserve_in + amount_in) > 0 else 0
-                        impact = abs(price_after - price_before) / price_before if price_before not in (
-                        0, float('inf')) else 1.0
+                            fee_multiplier_num = 10000 - 25  # 0.25% fee
+                            numerator = amount_in * fee_multiplier_num * reserve_out
+                            denominator = reserve_in * 10000 + amount_in * fee_multiplier_num
+                            estimated_by_pair = numerator // denominator if denominator > 0 else 0
 
-                        print(f"V2 hop {a}->{b}: est_out {estimated_by_pair / (10 ** self.decimals_out)}, impact {impact:.6f}")
-                        if impact > max_price_impact:
-                            raise Exception(
-                                f"Price impact {impact:.6f} on hop {a}->{b} exceeds limit {max_price_impact}. Aborting for safety.")
+                            price_before = (reserve_out / (10 ** self.decimals_out)) / (
+                                        reserve_in / (10 ** self.decimals_in)) if reserve_in > 0 else float('inf')
+                            price_after = ((reserve_out - estimated_by_pair) / (10 ** self.decimals_out)) / (
+                                        (reserve_in + amount_in) / (10 ** self.decimals_in)) if (reserve_in + amount_in) > 0 else 0
+                            impact = abs(price_after - price_before) / price_before if price_before not in (
+                            0, float('inf')) else 1.0
+
+                            print(f"V2 hop {a}->{b}: est_out {estimated_by_pair / (10 ** self.decimals_out)}, impact {impact:.6f}")
+                            if impact > max_price_impact:
+                                raise Exception(
+                                    f"Price impact {impact:.6f} on hop {a}->{b} exceeds limit {max_price_impact}. Aborting for safety.")
+                    else:
+                        raise Exception(
+                            "factoryV2 not available from router — cannot check V2 pair impacts. Aborting for safety.")
+
+                # --- подготовка транзакции: exactInputSingle или swapExactTokensForTokens ---
+                if chosen_type == 'v3':
+                    if v3_fee_used is None:
+                        raise Exception("No usable V3 fee / estimation found though chosen_type==v3")
+                    params_exec = (
+                        token_in_addr,
+                        token_out_addr,
+                        v3_fee_used,
+                        self.from_addr,
+                        amount_in,
+                        amount_out_min,
+                        0
+                    )
+                    txn_func = self.router.functions.exactInputSingle(params_exec)
                 else:
-                    raise Exception(
-                        "factoryV2 not available from router — cannot check V2 pair impacts. Aborting for safety.")
+                    txn_func = self.router.functions.swapExactTokensForTokens(
+                        amount_in,
+                        amount_out_min,
+                        v2_path_used,
+                        self.from_addr
+                    )
 
-            # --- подготовка транзакции: exactInputSingle или swapExactTokensForTokens ---
-            if chosen_type == 'v3':
-                if v3_fee_used is None:
-                    raise Exception("No usable V3 fee / estimation found though chosen_type==v3")
-                params_exec = (
-                    token_in_addr,
-                    token_out_addr,
-                    v3_fee_used,
-                    self.from_addr,
-                    amount_in,
-                    amount_out_min,
-                    0
-                )
-                txn_func = self.router.functions.exactInputSingle(params_exec)
-            else:
-                txn_func = self.router.functions.swapExactTokensForTokens(
-                    amount_in,
-                    amount_out_min,
-                    v2_path_used,
-                    self.from_addr
-                )
+                # оценка газа (async)
+                try:
+                    gas_est = await txn_func.estimate_gas({'from': self.from_addr})
+                except Exception:
+                    gas_est = 400000
 
-            # оценка газа (async)
-            try:
-                gas_est = await txn_func.estimate_gas({'from': self.from_addr})
-            except Exception:
-                gas_est = 400000
+                txn = await txn_func.build_transaction({
+                    'from': self.from_addr,
+                    'gas': int(gas_est * 1.3),
+                    'gasPrice': await self.rpc.eth.gas_price,
+                    'nonce': nonce,
+                })
 
-            txn = await txn_func.build_transaction({
-                'from': self.from_addr,
-                'gas': int(gas_est * 1.3),
-                'gasPrice': await self.rpc.eth.gas_price,
-                'nonce': nonce,
-            })
+                # sign (in thread) и отправка
+                signed_txn = await asyncio.to_thread(Account.sign_transaction, txn, self.private_key)
+                tx_hash = await self.rpc.eth.send_raw_transaction(signed_txn.raw_transaction)
+                receipt = await self.rpc.eth.wait_for_transaction_receipt(tx_hash)
 
-            # sign (in thread) и отправка
-            signed_txn = await asyncio.to_thread(Account.sign_transaction, txn, self.private_key)
-            tx_hash = await self.rpc.eth.send_raw_transaction(signed_txn.raw_transaction)
-            receipt = await self.rpc.eth.wait_for_transaction_receipt(tx_hash)
+                if receipt.status != 1:
+                    raise Exception(f"Swap failed, tx hash: {tx_hash.hex()}")
 
-            if receipt.status != 1:
-                raise Exception(f"Swap failed, tx hash: {tx_hash.hex()}")
-
-            # gas_used = receipt.gasUsed
-            # fee = Web3.from_wei(gas_used * (await self.rpc.eth.gas_price), 'ether')
+                # gas_used = receipt.gasUsed
+                # fee = Web3.from_wei(gas_used * (await self.rpc.eth.gas_price), 'ether')
 
 
-            # извлечение фактического вывода (парсим события Transfer) — синхронная логика через to_thread
-            actual_out = 0
-            # token_out_contract = self.rpc.eth.contract(address=token_out_addr, abi=erc20_abi)
-            # for log in receipt.logs:
-            #     try:
-            #         # process_log — синхронная функция в web3.py, вызываем в потоке
-            #         processed = await asyncio.to_thread(token_out_contract.events.Transfer().process_log, log)
-            #         if processed['args']['to'].lower() == self.from_addr.lower():
-            #             actual_out = processed['args']['value']
-            #             break
-            #     except Exception:
-            #         continue
+                # извлечение фактического вывода (парсим события Transfer) — синхронная логика через to_thread
+                actual_out = 0
+                # token_out_contract = self.rpc.eth.contract(address=token_out_addr, abi=erc20_abi)
+                # for log in receipt.logs:
+                #     try:
+                #         # process_log — синхронная функция в web3.py, вызываем в потоке
+                #         processed = await asyncio.to_thread(token_out_contract.events.Transfer().process_log, log)
+                #         if processed['args']['to'].lower() == self.from_addr.lower():
+                #             actual_out = processed['args']['value']
+                #             break
+                #     except Exception:
+                #         continue
 
-            # if actual_out > 0:
-            #     print(f"Transaction successful! TxHash: {tx_hash.hex()} | fee: {fee} BNB Actual | output: {actual_out / (10 ** self.decimals_out)} | TIME {time() - t}")
+                # if actual_out > 0:
+                #     print(f"Transaction successful! TxHash: {tx_hash.hex()} | fee: {fee} BNB Actual | output: {actual_out / (10 ** self.decimals_out)} | TIME {time() - t}")
 
-            return tx_hash.hex()
-        except Exception as e:
-            print(f'Ошибка в совершении транзакции: {e}')
-            return 'прошла обратная замена КУПИЛИ ЗАНОВО'
+                return tx_hash.hex()
+            except Exception as e:
+                print(f'Ошибка в совершении транзакции: {e}')
+                if attempt < max_retries - 1:
+                    slippage = slippage + (0.005 * (attempt + 1))
+                    print(f"Retrying with slippage {slippage:.2%}...")
+                    await asyncio.sleep(attempt+1)
+                else:
+                    return 'прошла обратная замена КУПИЛИ ЗАНОВО'
