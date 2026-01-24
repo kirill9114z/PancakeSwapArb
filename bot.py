@@ -45,6 +45,8 @@ class Form(StatesGroup):
     ADD_PAIR_ADDRESS_CONTRACT = State()
     ADD_PAIR_ABI_CONTRACT = State()
     ADD_PAIR_MAX_VOL = State()
+    UPDATE_UID_PAIR = State()
+    UID_INPUT2 = State()
 
 
 bot_process = None
@@ -134,6 +136,8 @@ async def start_arbitrage_bot(message: types.Message):
 @dp.message(Form.SETTINGS, F.text == "🛑 Остановить бота")
 async def stop_arbitrage_bot(message: types.Message):
     global arb_task
+    if arb_task is None:
+        await message.answer("🛑 Арбитражный бот уже остановлен!")
     print(f'Lst: {active_arbitrage_instances}')
     pairs = db.get_all_pairs()
     for pair in pairs:
@@ -147,48 +151,48 @@ async def stop_arbitrage_bot(message: types.Message):
     await message.answer("🛑 Арбитражный бот остановлен!")
 
 
-@dp.message(Form.SETTINGS, F.text == "🆔 Обновить U_ID")
-async def update_uid_handler(message: types.Message, state: FSMContext):
-    # Сохраняем текущее состояние, чтобы вернуться к нему позже
-    await state.update_data(prev_state=await state.get_state())
-
-    # Запрашиваем новый U_ID
-    await message.answer(
-        "Пожалуйста, введите ваш новый U_ID:",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-
-    # Устанавливаем состояние ожидания U_ID
-    await state.set_state(Form.UID_INPUT)
-
-    # Сохраняем информацию о том, что это обновление существующего U_ID
-    await state.update_data(is_update=True)
-
-
-@dp.message(Form.UID_INPUT)
-async def process_uid(message: types.Message, state: FSMContext):
-    """Обработчик ввода U_ID"""
-    data = await state.get_data()
-    uid_value = message.text.strip()
-
-    # Проверяем, что это обновление существующего U_ID
-    if data.get('is_update'):
-        # Сохраняем новый U_ID
-        db.set_uid(uid_value)
-        await message.answer(f"✅ U_ID успешно обновлен: {uid_value}")
-
-        # Возвращаемся в предыдущее состояние
-        prev_state = data.get('prev_state', Form.SETTINGS)
-        await state.set_state(prev_state)
-
-        # Возвращаемся в главное меню
-        await cmd_start(message, state)
-    else:
-        # Обработка первоначального ввода U_ID
-        print(f"New id: {uid_value}")
-        db.set_uid(uid_value)
-        await message.answer(f"✅ U_ID успешно сохранен: {uid_value}")
-        await cmd_start(message, state)
+# @dp.message(Form.SETTINGS, F.text == "🆔 Обновить U_ID")
+# async def update_uid_handler(message: types.Message, state: FSMContext):
+#     # Сохраняем текущее состояние, чтобы вернуться к нему позже
+#     await state.update_data(prev_state=await state.get_state())
+#
+#     # Запрашиваем новый U_ID
+#     await message.answer(
+#         "Пожалуйста, введите ваш новый U_ID:",
+#         reply_markup=types.ReplyKeyboardRemove()
+#     )
+#
+#     # Устанавливаем состояние ожидания U_ID
+#     await state.set_state(Form.UID_INPUT)
+#
+#     # Сохраняем информацию о том, что это обновление существующего U_ID
+#     await state.update_data(is_update=True)
+#
+#
+# @dp.message(Form.UID_INPUT)
+# async def process_uid(message: types.Message, state: FSMContext):
+#     """Обработчик ввода U_ID"""
+#     data = await state.get_data()
+#     uid_value = message.text.strip()
+#
+#     # Проверяем, что это обновление существующего U_ID
+#     if data.get('is_update'):
+#         # Сохраняем новый U_ID
+#         db.set_uid(uid_value)
+#         await message.answer(f"✅ U_ID успешно обновлен: {uid_value}")
+#
+#         # Возвращаемся в предыдущее состояние
+#         prev_state = data.get('prev_state', Form.SETTINGS)
+#         await state.set_state(prev_state)
+#
+#         # Возвращаемся в главное меню
+#         await cmd_start(message, state)
+#     else:
+#         # Обработка первоначального ввода U_ID
+#         print(f"New id: {uid_value}")
+#         db.set_uid(uid_value)
+#         await message.answer(f"✅ U_ID успешно сохранен: {uid_value}")
+#         await cmd_start(message, state)
 # =====================
 # НАСТРОЙКИ
 # =====================
@@ -198,11 +202,12 @@ async def settings_menu(message: types.Message, state: FSMContext):
     builder = ReplyKeyboardBuilder()
     builder.button(text="🌐 Глобальный спред")
     builder.button(text="🎯 Индивидуальный спред")
+    builder.button(text="🆔 Обновить U_ID")
     builder.button(text="🔙 Назад")
-    builder.adjust(2)
+    builder.adjust(2, 2)
 
     await message.answer(
-        "Настройки спреда:",
+        "Выберите действие",
         reply_markup=builder.as_markup(resize_keyboard=True)
     )
 
@@ -289,6 +294,59 @@ async def individual_spread_set(message: types.Message, state: FSMContext):
         return await cmd_start(message, state)
     except:
         await message.answer("❌ Ошибка! Введите число между 0 и 100:")
+
+@dp.message(Form.SETTINGS, F.text == "🆔 Обновить U_ID")
+async def update_uid(message: types.Message, state: FSMContext):
+    pairs = db.get_all_pairs()
+    if not pairs:
+        await message.answer("ℹ️ Сначала добавьте пары через меню 'Пары'")
+        return await settings_menu(message, state)
+    builder = ReplyKeyboardBuilder()
+    for pair in pairs:
+        builder.button(text=pair)
+    builder.button(text="🔙 Назад")
+    builder.adjust(2)
+
+    await message.answer(
+        "Выберите пару для обновления U_ID:",
+        reply_markup=builder.as_markup(resize_keyboard=True)
+    )
+    await state.set_state(Form.UPDATE_UID_PAIR)
+
+@dp.message(Form.UPDATE_UID_PAIR)
+async def individual_spread_select(message: types.Message, state: FSMContext):
+    pair = message.text.upper()
+    pairs = db.get_all_pairs()
+
+    if pair == "🔙 НАЗАД":
+        return await settings_menu(message, state)
+
+    if pair not in pairs:
+        await message.answer("❌ Пара не найдена! Выберите из списка:")
+        return
+
+    await state.update_data(selected_pair1=pair)
+    await message.answer(
+        f"Введите новый U_ID", reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(Form.UID_INPUT2)
+
+@dp.message(Form.UID_INPUT2)
+async def individual_spread_set(message: types.Message, state: FSMContext):
+    try:
+        u_id = str(message.text)
+        data = await state.get_data()
+        pair = data['selected_pair1']
+        res = db.update_pair_mexc_uid(pair, u_id)
+        if res:
+            await message.answer(f"✅ {pair} U_ID установлен")
+            return await cmd_start(message, state)
+        else:
+            await message.answer(f'❌ U_ID не установлен, какая то ошибка я хз')
+    except Exception as e:
+        await message.answer(f"❌ Произошла ошибка: {e}")
+        await state.clear()
+        await cmd_start(message, state)
+
 
 
 # =====================
