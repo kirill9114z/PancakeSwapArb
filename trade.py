@@ -841,5 +841,4 @@ class Arbitrage:
                         return
         except Exception as e:
             print(f'Error in make_trade: {e}')
-            await asyncio.sleep(1000)
 
