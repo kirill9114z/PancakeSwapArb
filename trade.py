@@ -36,10 +36,10 @@ class Arbitrage:
         self.running = True
 
         self.max_volume = max_volume
-        self.balance_usdt_mexc = 200
-        self.balance_token_mexc = 70
-        self.balance_token_dex = 70
-        self.balance_usdc_dex_bsc = 200
+        self.balance_usdt_mexc = 20000
+        self.balance_token_mexc = 7000
+        self.balance_token_dex = 70000
+        self.balance_usdc_dex_bsc = 20000
         self.native_token = 0
 
 
@@ -356,10 +356,10 @@ class Arbitrage:
 
     async def update_balances(self):
         try:
-            self.balance_usdt_mexc, self.balance_token_mexc = 100, 5
+            self.balance_usdt_mexc, self.balance_token_mexc = 10000, 500
             self.native_token = 0.1
-            self.balance_token_dex = 100
-            self.balance_usdc_dex_bsc = 5
+            self.balance_token_dex = 10000
+            self.balance_usdc_dex_bsc = 500
             return True
         except Exception as e:
             print(f"Failed to update balances: {e}")
@@ -603,7 +603,7 @@ class Arbitrage:
                                 'type': 'BUY_MEXC',
                                 'volume': volume,
                                 'mexc_price': mexc_price,
-                                'dex_price': okx_effective_price,
+                                'dex': okx_effective_price,
                                 'price': price,
                                 'profit': profit,
                                 'spread': spread,
@@ -626,14 +626,17 @@ class Arbitrage:
 
                     # Рассчитываем прибыль
                     profit = (mexc_price - okx_effective_price) * volume
-                    if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
+                    # if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
+                    if (float(okx_buy_price) * float(volume) <= 200):
                         spread = ((mexc_price - okx_effective_price) / okx_effective_price) * 100
+                        # print(f'S: {spread}: ')
+                        # if float(spread) >= -1000:       #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                         if float(spread) >= float(curr_spread):       #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                             candidates.append({
                                 'type': 'SELL_MEXC',
                                 'volume': volume,
                                 'mexc_price': mexc_price,
-                                'dex_price': okx_effective_price,
+                                'dex': okx_effective_price,
                                 'price': price,
                                 'profit': profit,
                                 'spread': spread,
@@ -661,7 +664,7 @@ class Arbitrage:
                             # await self.send_opportunity_alert(best)
                             await self.make_trade(best, session)
                 else:
-                    if okx_buy_price < 0.01:
+                    if okx_buy_price < 0.02:
                         print(f'one {okx_buy_price} | {okx_sell_price}')
                     continue
         except Exception as e:
@@ -704,7 +707,7 @@ class Arbitrage:
                             else:
                                 print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
                                 notification_text = (
-                                    f"🔔 Новая сделка!\n"
+                                    f"🔔 Новая сделка! {self.pair}\n"
                                     f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
                                     f"Объем: {status['filled']:.2f}\n"
                                     f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
@@ -727,7 +730,7 @@ class Arbitrage:
                             else:
                                 print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
                                 notification_text = (
-                                    f"🔔 Новая сделка!\n"
+                                    f"🔔 Новая сделка! {self.pair}\n"
                                     f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
                                     f"Объем: {status['filled']:.2f}\n"
                                     f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
@@ -748,7 +751,7 @@ class Arbitrage:
                     else:
                         print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
                         notification_text = (
-                            f"🔔 Новая сделка!\n"
+                            f"🔔 Новая сделка! {self.pair}\n"
                             f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
                             f"Объем: {status['filled']:.2f}\n"
                             f"Прибыль: ${best['profit']:.2f}\n"
@@ -784,7 +787,7 @@ class Arbitrage:
                             else:
                                 print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
                                 notification_text = (
-                                    f"🔔 Новая сделка!\n"
+                                    f"🔔 Новая сделка! {self.pair}\n"
                                     f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
                                     f"Объем: {status['filled']:.2f}\n"
                                     f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
@@ -807,7 +810,7 @@ class Arbitrage:
                             else:
                                 print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
                                 notification_text = (
-                                    f"🔔 Новая сделка!\n"
+                                    f"🔔 Новая сделка! {self.pair}\n"
                                     f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
                                     f"Объем: {status['filled']:.2f}\n"
                                     f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
@@ -827,7 +830,7 @@ class Arbitrage:
                     else:
                         print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
                         notification_text = (
-                            f"🔔 Новая сделка!\n"
+                            f"🔔 Новая сделка! {self.pair}\n"
                             f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
                             f"Объем: {best['volume']:.2f}\n"
                             f"Прибыль: ${best['profit']:.2f}\n"
