@@ -288,7 +288,7 @@ class Database:
 
 if __name__ == "__main__":
     d = Database()
-    # d.clear_database()
+    d.clear_database()
     # res1 = d.remove_pair_v2('EVAA/USDT')
     # res2 = d.get_all_pairs()
     res = d.get_pair_data('EVAA/USDT')
