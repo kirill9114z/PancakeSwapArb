@@ -712,4 +712,3 @@ async def request_new_uid(chat_id: int):
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main1())
-
