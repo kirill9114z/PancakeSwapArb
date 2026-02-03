@@ -4,13 +4,19 @@ from typing import Tuple, List, Optional
 
 import aiohttp
 from web3 import AsyncWeb3, AsyncHTTPProvider, Web3
+from web3.eth import AsyncEth
+from python_socks import ProxyType
+from web3_proxy_providers import AsyncWebsocketWithProxyProvider
 from eth_account import Account
 
 import asyncio
 from decimal import Decimal, getcontext
 from config import RPC_BSC
 import os
+import websockets
 
+os.environ["wss_proxy"] = "http://23.95.150.145:6114:feckkgft:a60ezsm8sq3h"
+os.environ["no_proxy"] = "localhost,127.0.0.1"
 
 # Сессия с connection pool и таймаутами
 _session: Optional[aiohttp.ClientSession] = None
@@ -27,6 +33,9 @@ class OkxTrade:
         self.wss = wss
         # self.w3 = Web3(Web3.LegacyWebSocketProvider(wss))
         self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(wss))
+        loop = asyncio.get_event_loop()
+
+
         self.rpc = AsyncWeb3(AsyncHTTPProvider(rpc))
         self.db = db
         self.account = self.rpc.eth.account.from_key(private_key)
@@ -86,10 +95,11 @@ class OkxTrade:
     async def side(self, pool):
         token0 = await pool.functions.token0().call()
         token1 = await pool.functions.token1().call()
+        print(f'TOKEN1 {token0} | TOKEN2 {token1}')
         if token1 == "0x55d398326f99059fF775485246999027B3197955":
-            return True
-        if token0 == "0x55d398326f99059fF775485246999027B3197955":
             return False
+        if token0 == "0x55d398326f99059fF775485246999027B3197955":
+            return True
         else:
             return None
 
@@ -104,15 +114,17 @@ class OkxTrade:
 
     async def handle_event(self, e, side1):
         args = e["args"]
+        # print(f'ARGS!!!!: {args}')
         amount0 = args['amount0']
         amount1 = args['amount1']
         sqrtPriceX96 = args["sqrtPriceX96"]
         raw_price = await self.sqrtPriceX96_to_price(sqrtPriceX96)
         price_corr = (await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out) if side1
-                      else 1 / await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out))
+                      else await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out))
         # print(f'Corr: {price_corr}')
         # if abs(float(price_corr) - self.rak) <= self.rak * 0.1:
-        if abs(float(price_corr) - self.rak) <= 1:
+        # price_corr = 1 / price_corr
+        if abs(float(price_corr) - self.rak) <= self.rak * 0.1:
             if amount0 < 0:
                 self.rak = float(price_corr)
                 self.sell = float(price_corr)
@@ -120,8 +132,8 @@ class OkxTrade:
                 self.rak = float(price_corr)
                 self.buy = float(price_corr)
 
-    async def get_rak(self, side):
-        contract = self.rpc.eth.contract(address=self.address, abi=self.abi)
+    async def get_rak(self, side, contract):
+        # contract = self.rpc.eth.contract(address=self.address, abi=self.abi)
 
         try:
             # 1) Определяем тип пула по ABI
@@ -132,6 +144,7 @@ class OkxTrade:
                 slot0_data = await contract.functions.slot0().call()
                 sqrt_price_x96 = slot0_data[0]
                 price = (sqrt_price_x96 / (2 ** 96)) ** 2
+                print(f'TRUE | {price}')
                 return float(price if side else 1 / price)
 
             else:
@@ -141,6 +154,7 @@ class OkxTrade:
                 # Цена token0 в token1: (r1/10^dec1) / (r0/10^dec0)
                 price_token1_in_token0 = (r0 / (10 ** self.decimals_in)) / (r1 / (10 ** self.decimals_out))
                 price_token0_in_token1 = 1 / price_token1_in_token0
+                print(f'ELSE: 0 {price_token1_in_token0} | 1 {price_token0_in_token1}')
 
                 return float(price_token0_in_token1 if side else price_token1_in_token0)
 
@@ -148,46 +162,73 @@ class OkxTrade:
             print(f"Error in execute rak price: {e}")
             return 1.0
 
-
     async def monitoring_price(self):
-        print(f'Start 2')
-        await self.w3.provider.connect()
-        pool = self.w3.eth.contract(address=self.address, abi=self.abi)
-        swap_filter = await pool.events.Swap.create_filter(from_block='latest')
+        global backoff
+        backoff = 1
+        print("Start 2")
+
+        pool = self.rpc.eth.contract(address=self.address, abi=self.abi)
         side = await self.side(pool)
-        self.rak = await self.get_rak(side)
-        print(f'rak: {self.rak} {self.pair}')
+        self.rak = await self.get_rak(side, pool)
+        # self.rak = 1/self.rak
+        print(f"rak: {self.rak} {self.pair}")
         if side is None:
             print("side1 is None, невозможна работа")
             return
+
+        # первый коннект и фильтр
+        await self.w3.provider.connect()
+        swap_filter = await pool.events.Swap.create_filter(from_block="latest")
+
         try:
-            while self.running == True:
+            while self.running:
+                try:
+                    # Проверка коннекта раз в цикл
+                    if not await self.w3.provider.is_connected():
+                        await self.w3.provider.disconnect()
+                        await self.w3.provider.connect()
+                        swap_filter = await pool.events.Swap.create_filter(from_block="latest")
+                        backoff = 1
+
+                    events = await swap_filter.get_new_entries()
+                    for e in events:
+                        if not self.running:
+                            break
+                        await self.handle_event(e, side)
+
+                    await asyncio.sleep(0.1)  # чуть больше пауза, разгрузка loop
+
+                except (websockets.ConnectionClosedError, OSError) as e:
+                    print(f"WS disconnected: {e}. Reconnecting in {backoff}s")
                     try:
-                        events = await swap_filter.get_new_entries()
-                        for e in events:
-                            if not self.running:  # Проверка после каждого события
-                                break
-                            await self.handle_event(e, side)
-                        await asyncio.sleep(0.05)
-                    except Exception as exc:
-                        print("Ошибка при получении новых записей:", exc)
+                        await self.w3.provider.disconnect()
+                    except Exception:
+                        pass
+
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
+
+                    # после паузы — новый коннект и фильтр
+                    await self.w3.provider.connect()
+                    swap_filter = await pool.events.Swap.create_filter(from_block="latest")
+
+                except Exception as e:
+                    print("Unexpected WS error:", e)
+                    await asyncio.sleep(1)
         finally:
             try:
-                # swap_filter = None
-                await self.w3.provider.disconnect() if self.w3.provider else None
+                await self.w3.provider.disconnect()
             except Exception as e:
-                print(f'Не получилось закрыть соединения вебсоккета, ошибка: {e}')
-                pass
+                print(f"Не получилось закрыть соединения вебсоккета, ошибка: {e}")
             print(f"Monitoring price stopped for {self.address}")
-
 
     async def swap_universal_async(
             self,
             token_in: str,
             token_out: str,
             amount_in_human: float,
-            slippage: float = 0.02,
-            max_price_impact: float = 0.1,
+            slippage: float = 0.05,
+            max_price_impact: float = 0.5,
             min_profit_percent: float = 0.0,
             max_retries: int = 3
     ):
@@ -371,6 +412,7 @@ class OkxTrade:
                             if impact > max_price_impact:
                                 raise Exception(
                                     f"Price impact {impact:.6f} on hop {a}->{b} exceeds limit {max_price_impact}. Aborting for safety.")
+
                     else:
                         raise Exception(
                             "factoryV2 not available from router — cannot check V2 pair impacts. Aborting for safety.")
@@ -418,26 +460,6 @@ class OkxTrade:
                 if receipt.status != 1:
                     raise Exception(f"Swap failed, tx hash: {tx_hash.hex()}")
 
-                # gas_used = receipt.gasUsed
-                # fee = Web3.from_wei(gas_used * (await self.rpc.eth.gas_price), 'ether')
-
-
-                # извлечение фактического вывода (парсим события Transfer) — синхронная логика через to_thread
-                actual_out = 0
-                # token_out_contract = self.rpc.eth.contract(address=token_out_addr, abi=erc20_abi)
-                # for log in receipt.logs:
-                #     try:
-                #         # process_log — синхронная функция в web3.py, вызываем в потоке
-                #         processed = await asyncio.to_thread(token_out_contract.events.Transfer().process_log, log)
-                #         if processed['args']['to'].lower() == self.from_addr.lower():
-                #             actual_out = processed['args']['value']
-                #             break
-                #     except Exception:
-                #         continue
-
-                # if actual_out > 0:
-                #     print(f"Transaction successful! TxHash: {tx_hash.hex()} | fee: {fee} BNB Actual | output: {actual_out / (10 ** self.decimals_out)} | TIME {time() - t}")
-
                 return tx_hash.hex()
             except Exception as e:
                 print(f'Ошибка в совершении транзакции: {e}')
@@ -447,3 +469,11 @@ class OkxTrade:
                     await asyncio.sleep(attempt+1)
                 else:
                     return 'прошла обратная замена КУПИЛИ ЗАНОВО'
+#
+# if __name__ == "__main__":
+#     import os
+#
+#     print(os.environ.get("http_proxy"))
+#     print(os.environ.get("https_proxy"))
+#     print(os.environ.get("HTTP_PROXY"))
+#     print(os.environ.get("HTTPS_PROXY"))
