@@ -300,70 +300,70 @@ class Arbitrage:
 
 
 
-    # async def update_balances(self, stale_seconds: int = 3):
-    #     try:
-    #         t0 = time.time()
-    #         pair_data = self.db.get_pair_data(self.pair)
-    #
-    #         token_addresses = [
-    #             pair_data['contract_bsc'],  # ваш токен
-    #             USDT_CONTRACTS
-    #         ]
-    #         decimals_map = {
-    #             token_addresses[0]: pair_data['decimals'],
-    #             token_addresses[1]: 18
-    #         }
-    #
-    #         task_exchange = asyncio.create_task(self._safe_fetch_balance())
-    #         task_multicall = asyncio.create_task(
-    #             self._multicall_balances_with_native(token_addresses, self.owner.address, decimals_map)
-    #         )
-    #
-    #         mexc_res, multicall_res = await asyncio.gather(task_exchange, task_multicall, return_exceptions=True)
-    #
-    #         if isinstance(mexc_res, Exception):
-    #             print("MEXC task error:", mexc_res)
-    #             mexc_res = (0.0, 0.0)
-    #
-    #         if isinstance(multicall_res, Exception):
-    #             print("Multicall task error:", multicall_res)
-    #             token_dict = {addr: 0.0 for addr in token_addresses}
-    #             native_val = await self._safe_get_bnb_balance()
-    #         else:
-    #             token_dict, native_val = multicall_res
-    #             if native_val is None:
-    #                 native_val = await self._safe_get_bnb_balance()
-    #
-    #         # if native_val < 0.0007: !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    #         #     self.running = False
-    #         #     await self.send_notification(f'Осталось мало BNB, пополните баланс.')
-    #
-    #         self.balance_usdt_mexc, self.balance_token_mexc = mexc_res
-    #         self.native_token = native_val
-    #         self.balance_token_dex = token_dict.get(token_addresses[0], 0.0)
-    #         self.balance_usdc_dex_bsc = token_dict.get(token_addresses[1], 0.0)
-    #
-    #         print(f"MEXC {self.balance_usdt_mexc, self.balance_token_mexc}")
-    #         print(f"Native: {self.native_token}")
-    #         print(f"Dex: {self.balance_token_dex, self.balance_usdc_dex_bsc}")
-    #         print(f"TIME: {time.time() - t0}")
-    #
-    #         return True
-    #     except Exception as e:
-    #         print(f"Failed to update balances: {e}")
-    #         return False
-
-
     async def update_balances(self):
         try:
-            self.balance_usdt_mexc, self.balance_token_mexc = 10000, 500
-            self.native_token = 0.1
-            self.balance_token_dex = 10000
-            self.balance_usdc_dex_bsc = 500
+            t0 = time.time()
+            pair_data = self.db.get_pair_data(self.pair)
+
+            token_addresses = [
+                pair_data['contract_bsc'],  # ваш токен
+                USDT_CONTRACTS
+            ]
+            decimals_map = {
+                token_addresses[0]: pair_data['decimals'],
+                token_addresses[1]: 18
+            }
+
+            task_exchange = asyncio.create_task(self._safe_fetch_balance())
+            task_multicall = asyncio.create_task(
+                self._multicall_balances_with_native(token_addresses, self.owner.address, decimals_map)
+            )
+
+            mexc_res, multicall_res = await asyncio.gather(task_exchange, task_multicall, return_exceptions=True)
+
+            if isinstance(mexc_res, Exception):
+                print("MEXC task error:", mexc_res)
+                mexc_res = (0.0, 0.0)
+
+            if isinstance(multicall_res, Exception):
+                print("Multicall task error:", multicall_res)
+                token_dict = {addr: 0.0 for addr in token_addresses}
+                native_val = await self._safe_get_bnb_balance()
+            else:
+                token_dict, native_val = multicall_res
+                if native_val is None:
+                    native_val = await self._safe_get_bnb_balance()
+
+            # if native_val < 0.0007: !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            #     self.running = False
+            #     await self.send_notification(f'Осталось мало BNB, пополните баланс.')
+
+            self.balance_usdt_mexc, self.balance_token_mexc = mexc_res
+            self.native_token = native_val
+            self.balance_token_dex = token_dict.get(token_addresses[0], 0.0)
+            self.balance_usdc_dex_bsc = token_dict.get(token_addresses[1], 0.0)
+
+            print(f"MEXC {self.balance_usdt_mexc, self.balance_token_mexc}")
+            print(f"Native: {self.native_token}")
+            print(f"Dex: {self.balance_token_dex, self.balance_usdc_dex_bsc}")
+            print(f"TIME: {time.time() - t0}")
+
             return True
         except Exception as e:
             print(f"Failed to update balances: {e}")
             return False
+
+
+    # async def update_balances(self):
+    #     try:
+    #         self.balance_usdt_mexc, self.balance_token_mexc = 10000, 500
+    #         self.native_token = 0.1
+    #         self.balance_token_dex = 10000
+    #         self.balance_usdc_dex_bsc = 500
+    #         return True
+    #     except Exception as e:
+    #         print(f"Failed to update balances: {e}")
+    #         return False
 
 
     async def _safe_fetch_balance(self, max_retries: int = 2, delay: float = 0.5):
@@ -626,11 +626,9 @@ class Arbitrage:
 
                     # Рассчитываем прибыль
                     profit = (mexc_price - okx_effective_price) * volume
-                    # if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
-                    if (float(okx_buy_price) * float(volume) <= 200):
+                    if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
+                    # if (float(okx_buy_price) * float(volume) <= 200):
                         spread = ((mexc_price - okx_effective_price) / okx_effective_price) * 100
-                        # print(f'S: {spread}: ')
-                        # if float(spread) >= -1000:       #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                         if float(spread) >= float(curr_spread):       #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                             candidates.append({
                                 'type': 'SELL_MEXC',
@@ -675,6 +673,102 @@ class Arbitrage:
         # finally:
         # await session.close()
 
+    async def handle_swap(self, val, status, best, symbol, u_id, session):
+        if best['type'] == 'SELL_MEXC':
+            if val.success:
+                print(f'SELL_MX -> BUY_PNK | TOKEN: {self.pair} | ХЭШ: {val.tx_hash}')
+                notification_text = (
+                    f"🔔 Новая сделка! {self.pair}\n"
+                    f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
+                    f"Объем: {status['filled']:.2f}\n"
+                    f"Прибыль: ${best['profit']:.2f}\n"
+                    f"Хэш: {val.tx_hash}"
+                )
+                await self.send_notification(notification_text)
+                await self.update_balances()
+            elif val.error_type in [
+                val.FATAL_NO_GAS,
+                val.FATAL_TOKEN_ISSUE,
+                val.FATAL_NO_LIQUIDITY
+            ]:
+                print(f"❌ DEX swap FATAL: {val.error_type.value} - {val.error_msg}")
+
+                # Автоматическая обратная покупка на MEXC (фиксируем убыток)
+                await self.send_notification(
+                    f"❌ PAIR: {self.pair}"
+                    f"⚠️ DEX swap не удался ({val.error_type.value})\n"
+                    f"Выполняю обратную покупку на MEXC для закрытия позиции..."
+                )
+                order = await place_limit_order(symbol, 10000, status['filled'], False, u_id, session)
+                if order:
+                    order_id = order['data']
+                    await asyncio.sleep(1)
+                    status2 = status = await self.exchange.fetch_order(order_id, self.pair)
+                    await self.send_notification(f'Усешно купили {status2['filled']} | продали {status['filled']}\nВозвращенно: {(status2['filled']/status['filled']) * 100:.2f}%')
+                    await self.update_balances()
+                else:
+                    await self.send_notification(
+                        f"❌ КРИТИЧНО! Обратная покупка на MEXC не удалась!\n"
+                        f"Срочно купите вручную ~{status['filled']} токен {self.pair}"
+                    )
+            else:
+                # Неизвестная ошибка
+                await self.send_notification(
+                    f"⚠️ DEX swap unknow error: {val.error_msg}\n"
+                    f"Проверьте баланс вручную"
+                )
+                await self.update_balances()
+                return
+
+        else:
+            if val.success:
+                print(f'SELL_PNK -> BUY_MX | TOKEN: {self.pair} | ХЭШ: {val.tx_hash}')
+                notification_text = (
+                    f"🔔 Новая сделка! {self.pair}\n"
+                    f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
+                    f"Объем: {status['filled']:.2f}\n"
+                    f"Прибыль: ${best['profit']:.2f}\n"
+                    f"Хэш: {val.tx_hash}"
+                )
+                await self.send_notification(notification_text)
+                await self.update_balances()
+                return
+            elif val.error_type in [
+                val.FATAL_NO_GAS,
+                val.FATAL_TOKEN_ISSUE,
+                val.FATAL_NO_LIQUIDITY
+            ]:
+                print(f"❌ DEX swap FATAL: {val.error_type.value} - {val.error_msg}")
+
+                # Автоматическая обратная покупка на MEXC (фиксируем убыток)
+                await self.send_notification(
+                    f"❌ PAIR: {self.pair}"
+                    f"⚠️ DEX swap не удался ({val.error_type.value})\n"
+                    f"Выполняю обратную продажу на MEXC для закрытия позиции..."
+                )
+                order = await place_limit_order(symbol, best['price']*0.9, best['volume'], True, u_id, session)
+                if order:
+                    order_id = order['data']
+                    await asyncio.sleep(1)
+                    status2 = status = await self.exchange.fetch_order(order_id, self.pair)
+                    await self.send_notification(f'Усешно продали {status2['filled']} | купили {status['filled']}\nВозвращенно: {(status2['filled']/status['filled']) * 100:.2f}%')
+                    await self.update_balances()
+                    return
+                else:
+                    await self.send_notification(
+                        f"❌ КРИТИЧНО! Обратная покупка на MEXC не удалась!\n"
+                        f"Срочно купите вручную ~{status['filled']} токен {self.pair}"
+                    )
+                    return
+            else:
+                # Неизвестная ошибка
+                await self.send_notification(
+                    f"⚠️ DEX swap unknow error: {val.error_msg}\n"
+                    f"Проверьте баланс вручную"
+                )
+                await self.update_balances()
+                return
+
     async def make_trade(self, best, session):
         curr_pair = self.pair.split('/')
         symbol = f"{curr_pair[0]}_{curr_pair[1]}"
@@ -698,68 +792,74 @@ class Arbitrage:
                         if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
-                            if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                                await self.send_notification(
-                                    f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
-                                await asyncio.sleep(300)
-                                await self.update_balances()
-                                return
-                            else:
-                                print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                                notification_text = (
-                                    f"🔔 Новая сделка! {self.pair}\n"
-                                    f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                                    f"Объем: {status['filled']:.2f}\n"
-                                    f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
-                                    f"Хэш: {val}"
-                                )
-                                await self.send_notification(notification_text)
-                                await self.update_balances()
-                                return
+                            # if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
+                            #     await self.send_notification(
+                            #         f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
+                            #     await asyncio.sleep(300)
+                            #     await self.update_balances()
+                            #     return
+                            # else:
+                            #     print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
+                            #     notification_text = (
+                            #         f"🔔 Новая сделка! {self.pair}\n"
+                            #         f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
+                            #         f"Объем: {status['filled']:.2f}\n"
+                            #         f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
+                            #         f"Хэш: {val}"
+                            #     )
+                            #     await self.send_notification(notification_text)
+                            #     await self.update_balances()
+                            #     return
+                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            return 
                         if status['status'] == 'closed':
                             print(status)
                             break
                         if status['status'] == "canceled":
                             val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
-                            if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                                await self.send_notification(
-                                    f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
-                                await asyncio.sleep(300)
-                                await self.update_balances()
-                                return
-                            else:
-                                print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                                notification_text = (
-                                    f"🔔 Новая сделка! {self.pair}\n"
-                                    f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                                    f"Объем: {status['filled']:.2f}\n"
-                                    f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
-                                    f"Хэш: {val}"
-                                )
-                                await self.send_notification(notification_text)
-                                await self.update_balances()
-                                return
+                            # if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
+                            #     await self.send_notification(
+                            #         f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
+                            #     await asyncio.sleep(300)
+                            #     await self.update_balances()
+                            #     return
+                            # else:
+                            #     print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
+                            #     notification_text = (
+                            #         f"🔔 Новая сделка! {self.pair}\n"
+                            #         f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
+                            #         f"Объем: {status['filled']:.2f}\n"
+                            #         f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
+                            #         f"Хэш: {val}"
+                            #     )
+                            #     await self.send_notification(notification_text)
+                            #     await self.update_balances()
+                            #     return
+                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            return 
                         await asyncio.sleep(0.05)
                     # 3) DEX swap
                     val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
-                    if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                        await self.send_notification(
-                            f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
-                        await asyncio.sleep(300)
-                        await self.update_balances()
-                        return
-                    else:
-                        print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                        notification_text = (
-                            f"🔔 Новая сделка! {self.pair}\n"
-                            f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                            f"Объем: {status['filled']:.2f}\n"
-                            f"Прибыль: ${best['profit']:.2f}\n"
-                            f"Хэш: {val}"
-                        )
-                        await self.send_notification(notification_text)
-                        await self.update_balances()
-                        return
+                    # if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
+                    #     await self.send_notification(
+                    #         f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
+                    #     await asyncio.sleep(300)
+                    #     await self.update_balances()
+                    #     return
+                    # else:
+                    #     print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
+                    #     notification_text = (
+                    #         f"🔔 Новая сделка! {self.pair}\n"
+                    #         f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
+                    #         f"Объем: {status['filled']:.2f}\n"
+                    #         f"Прибыль: ${best['profit']:.2f}\n"
+                    #         f"Хэш: {val}"
+                    #     )
+                    #     await self.send_notification(notification_text)
+                    #     await self.update_balances()
+                    #     return
+                    await self.handle_swap(val, status, best, symbol, u_id, session)
+                    return
             else:
                 order = await place_limit_order(symbol, best["price"], best['volume'], False, u_id, session)
                 if order == False:
