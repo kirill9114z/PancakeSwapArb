@@ -1,14 +1,9 @@
 import sys
 import asyncio
 from trade import Arbitrage
-from web3 import AsyncWeb3
-from web3.exceptions import ContractLogicError
 from database import Database
 import logging
 import ccxt.async_support as ccxt
-from web3.middleware import ExtraDataToPOAMiddleware
-from config import API_KEY_MEXC, API_SECRET_MEXC, RPC_ETH, RPC_BSC, RPC_BASE
-from abi_contract import abi
 
 from pancake_trade import OkxTrade
 if sys.platform == 'win32':
@@ -44,7 +39,7 @@ async def monitor_pair(pair_name, db, chat_id, bot):
     arbitrage.running = True
     pancake.running = True
     # Создаем экземпляр арбитражного бота для пары
-    await asyncio.sleep(10)
+    await asyncio.sleep(20)
     await arbitrage.update_balances()
     try:
         tasks = []
@@ -80,21 +75,6 @@ async def main(chat_id, bot):
         if not pairs:
             logger.warning("No pairs found in database. Add pairs via Telegram bot.")
             return
-
-        # mexc_client = ccxt.mexc({
-        #     'apiKey': API_KEY_MEXC,
-        #     'secret': API_SECRET_MEXC,  # НУЖНО БУДЕТ ИМПОРТИРОВАТЬ ИЗ КОНФИГА АПИ_КЕЙ И АПИСИКРЕТ
-        #     'enableRateLimit': True,
-        #     'timeout': 30000
-        # })
-        # w3_providers = {
-        #     1: AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_ETH)),
-        #     8453: AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_BASE)),
-        #     56: AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_BSC))
-        # }
-        # for w3 in w3_providers.values():
-        #     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, name='ExtraDataToPOA', layer=0)
-        # Создаем задачи для мониторинга каждой пары
         tasks = []
         for pair in pairs:
             task = asyncio.create_task(monitor_pair(pair, db, chat_id, bot))
@@ -103,4 +83,3 @@ async def main(chat_id, bot):
         await asyncio.gather(*tasks)
     except Exception as e:
         logger.exception(f"Critical error in main: {e}")
-
