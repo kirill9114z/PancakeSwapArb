@@ -1,6 +1,7 @@
 import json
 from time import time
 from typing import Tuple, List, Optional
+from enum import Enum
 
 import aiohttp
 from web3 import AsyncWeb3, AsyncHTTPProvider, Web3
@@ -22,6 +23,29 @@ os.environ["no_proxy"] = "localhost,127.0.0.1"
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
 
+
+class SwapErrorType(Enum):
+    SUCCESS = "success"
+    RETRYABLE_SLIPPAGE = "retryable_slippage"
+    RETRYABLE_IMPACT = "retryable_impact"
+    RETRYABLE_LIQUIDITY = "retryable_liquidity"
+    RETRYABLE_GAS = "retryable_gas"
+    RETRYABLE_NONCE = "retryable_nonce"
+    FATAL_NO_GAS = "fatal_no_gas"
+    FATAL_TOKEN_ISSUE = "fatal_token_issue"
+    FATAL_NO_LIQUIDITY = "fatal_no_liquidity"
+
+
+class SwapResult:
+    def __init__(self, success: bool, tx_hash: Optional[str] = None,
+                 error_type: SwapErrorType = SwapErrorType.SUCCESS,
+                 error_msg: str = ""):
+        self.success = success
+        self.tx_hash = tx_hash
+        self.error_type = error_type
+        self.error_msg = error_msg
+
+
 class OkxTrade:
     def __init__(self, pair, address, abi, dec2, rak, private_key, wss, rpc, db):
         self.pair = pair
@@ -34,6 +58,7 @@ class OkxTrade:
         # self.w3 = Web3(Web3.LegacyWebSocketProvider(wss))
         self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(wss))
         loop = asyncio.get_event_loop()
+        self.USDT_ADDRESS = "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
 
 
         self.rpc = AsyncWeb3(AsyncHTTPProvider(rpc))
@@ -96,12 +121,13 @@ class OkxTrade:
         token0 = await pool.functions.token0().call()
         token1 = await pool.functions.token1().call()
         print(f'TOKEN1 {token0} | TOKEN2 {token1}')
-        if token1 == "0x55d398326f99059fF775485246999027B3197955":
+        if token1 == self.USDT_ADDRESS:
             return False
-        if token0 == "0x55d398326f99059fF775485246999027B3197955":
-            return True
+        if token0 == self.USDT_ADDRESS:
+            return False
         else:
             return None
+
 
     async def sqrtPriceX96_to_price(self, sqrtPriceX96: int) -> Decimal:
         sqrt_price = Decimal(sqrtPriceX96) / (Decimal(2) ** 96)
@@ -119,18 +145,20 @@ class OkxTrade:
         amount1 = args['amount1']
         sqrtPriceX96 = args["sqrtPriceX96"]
         raw_price = await self.sqrtPriceX96_to_price(sqrtPriceX96)
-        price_corr = (await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out) if side1
+        price_corr = 1 / (await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out) if side1
                       else await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out))
         # print(f'Corr: {price_corr}')
         # if abs(float(price_corr) - self.rak) <= self.rak * 0.1:
         # price_corr = 1 / price_corr
-        if abs(float(price_corr) - self.rak) <= self.rak * 0.1:
+        if abs(float(price_corr) - self.rak) <= self.rak * 0.5:
             if amount0 < 0:
                 self.rak = float(price_corr)
-                self.sell = float(price_corr)
+                self.buy = float(price_corr)
+                # self.sell = float(price_corr)
             if amount1 < 0:
                 self.rak = float(price_corr)
-                self.buy = float(price_corr)
+                # self.buy = float(price_corr)
+                self.sell = float(price_corr)
 
     async def get_rak(self, side, contract):
         # contract = self.rpc.eth.contract(address=self.address, abi=self.abi)
@@ -150,8 +178,6 @@ class OkxTrade:
             else:
                 # ===== V2 pair =====
                 r0, r1, _ = await contract.functions.getReserves().call()
-                # Цена token1 в token0: (r0/10^dec0) / (r1/10^dec1)
-                # Цена token0 в token1: (r1/10^dec1) / (r0/10^dec0)
                 price_token1_in_token0 = (r0 / (10 ** self.decimals_in)) / (r1 / (10 ** self.decimals_out))
                 price_token0_in_token1 = 1 / price_token1_in_token0
                 print(f'ELSE: 0 {price_token1_in_token0} | 1 {price_token0_in_token1}')
@@ -194,9 +220,9 @@ class OkxTrade:
                     for e in events:
                         if not self.running:
                             break
-                        await self.handle_event(e, side)
+                        await self.handle_event(e, side) #обратно заменить
 
-                    await asyncio.sleep(0.1)  # чуть больше пауза, разгрузка loop
+                    await asyncio.sleep(0.05)  # чуть больше пауза, разгрузка loop
 
                 except (websockets.ConnectionClosedError, OSError) as e:
                     print(f"WS disconnected: {e}. Reconnecting in {backoff}s")
@@ -258,7 +284,14 @@ class OkxTrade:
                     txh = await self.rpc.eth.send_raw_transaction(signed.raw_transaction)
                     receipt = await self.rpc.eth.wait_for_transaction_receipt(txh)
                     if receipt.status != 1:
-                        raise Exception("Approve failed")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+                        else:
+                            return SwapResult(
+                                success=False,
+                                error_type=SwapErrorType.FATAL_TOKEN_ISSUE,
+                                error_msg="Approve failed after retries")
                     nonce += 1
 
                 debug: List[str] = []
@@ -319,9 +352,15 @@ class OkxTrade:
                 await asyncio.gather(*(try_v2_path(p) for p in candidate_paths))
 
                 if amount_out_est_v3 == 0 and amount_out_est_v2 == 0:
-                    for m in debug:
-                        print(m)
-                    raise Exception("All estimation methods failed: no V3 or V2 estimate available.")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(3)
+                        continue
+                    else:
+                        return SwapResult(
+                            success=False,
+                            error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
+                            error_msg="No V2/V3 liquidity after retries"
+                        )
 
                 if amount_out_est_v3 >= amount_out_est_v2:
                     chosen_type = 'v3'
@@ -332,8 +371,8 @@ class OkxTrade:
                     chosen_amount_out_est = amount_out_est_v2
                     debug.append(f"Chosen V2 path {v2_path_used} amount_out_est {chosen_amount_out_est/(10**self.decimals_out)}")
 
-                for m in debug:
-                    print(m)
+                # for m in debug:
+                #     print(m)
                 amount_out_min = int(chosen_amount_out_est * (1 - slippage))
 
                 # Проверка min_profit_percent
@@ -357,65 +396,84 @@ class OkxTrade:
                 if chosen_type == 'v2':
                     try:
                         factory_v2 = await self.router.functions.factoryV2().call()
-                    except Exception:
-                        factory_v2 = None
 
-                    if factory_v2:
-                        factory_abi = [
-                            {"constant": True,
-                             "inputs": [{"name": "tokenA", "type": "address"}, {"name": "tokenB", "type": "address"}],
-                             "name": "getPair", "outputs": [{"name": "pair", "type": "address"}], "type": "function"}
-                        ]
-                        factory = self.rpc.eth.contract(address=factory_v2, abi=factory_abi)
-                        for i in range(len(v2_path_used) - 1):
-                            a = v2_path_used[i]
-                            b = v2_path_used[i + 1]
-                            try:
-                                pair_addr = await factory.functions.getPair(a, b).call()
-                            except Exception:
-                                pair_addr = None
-                            if not pair_addr or int(pair_addr, 16) == 0:
-                                raise Exception(f"V2 pair for hop {a}->{b} not found (pair addr zero). Aborting for safety.")
-
-                            pair_abi = [
-                                {"constant": True, "inputs": [], "name": "getReserves",
-                                 "outputs": [{"name": "_reserve0", "type": "uint112"}, {"name": "_reserve1", "type": "uint112"},
-                                             {"name": "_blockTimestampLast", "type": "uint32"}], "type": "function"},
-                                {"constant": True, "inputs": [], "name": "token0", "outputs": [{"name": "", "type": "address"}],
-                                 "type": "function"},
-                                {"constant": True, "inputs": [], "name": "token1", "outputs": [{"name": "", "type": "address"}],
-                                 "type": "function"},
+                        if factory_v2:
+                            factory_abi = [
+                                {"constant": True,
+                                 "inputs": [{"name": "tokenA", "type": "address"}, {"name": "tokenB", "type": "address"}],
+                                 "name": "getPair", "outputs": [{"name": "pair", "type": "address"}], "type": "function"}
                             ]
-                            pair = self.rpc.eth.contract(address=pair_addr, abi=pair_abi)
-                            token0 = await pair.functions.token0().call()
-                            r0, r1, _ = await pair.functions.getReserves().call()
-                            if token0.lower() == a.lower():
-                                reserve_in = r0
-                                reserve_out = r1
-                            else:
-                                reserve_in = r1
-                                reserve_out = r0
+                            factory = self.rpc.eth.contract(address=factory_v2, abi=factory_abi)
+                            for i in range(len(v2_path_used) - 1):
+                                a = v2_path_used[i]
+                                b = v2_path_used[i + 1]
+                                try:
+                                    pair_addr = await factory.functions.getPair(a, b).call()
+                                except Exception:
+                                    pair_addr = None
+                                if not pair_addr or int(pair_addr, 16) == 0:
+                                    raise Exception(f"V2 pair for hop {a}->{b} not found (pair addr zero). Aborting for safety.")
 
-                            fee_multiplier_num = 10000 - 25  # 0.25% fee
-                            numerator = amount_in * fee_multiplier_num * reserve_out
-                            denominator = reserve_in * 10000 + amount_in * fee_multiplier_num
-                            estimated_by_pair = numerator // denominator if denominator > 0 else 0
+                                pair_abi = [
+                                    {"constant": True, "inputs": [], "name": "getReserves",
+                                     "outputs": [{"name": "_reserve0", "type": "uint112"}, {"name": "_reserve1", "type": "uint112"},
+                                                 {"name": "_blockTimestampLast", "type": "uint32"}], "type": "function"},
+                                    {"constant": True, "inputs": [], "name": "token0", "outputs": [{"name": "", "type": "address"}],
+                                     "type": "function"},
+                                    {"constant": True, "inputs": [], "name": "token1", "outputs": [{"name": "", "type": "address"}],
+                                     "type": "function"},
+                                ]
+                                pair = self.rpc.eth.contract(address=pair_addr, abi=pair_abi)
+                                token0 = await pair.functions.token0().call()
+                                r0, r1, _ = await pair.functions.getReserves().call()
+                                if token0.lower() == a.lower():
+                                    reserve_in = r0
+                                    reserve_out = r1
+                                else:
+                                    reserve_in = r1
+                                    reserve_out = r0
 
-                            price_before = (reserve_out / (10 ** self.decimals_out)) / (
-                                        reserve_in / (10 ** self.decimals_in)) if reserve_in > 0 else float('inf')
-                            price_after = ((reserve_out - estimated_by_pair) / (10 ** self.decimals_out)) / (
-                                        (reserve_in + amount_in) / (10 ** self.decimals_in)) if (reserve_in + amount_in) > 0 else 0
-                            impact = abs(price_after - price_before) / price_before if price_before not in (
-                            0, float('inf')) else 1.0
+                                fee_multiplier_num = 10000 - 25  # 0.25% fee
+                                numerator = amount_in * fee_multiplier_num * reserve_out
+                                denominator = reserve_in * 10000 + amount_in * fee_multiplier_num
+                                estimated_by_pair = numerator // denominator if denominator > 0 else 0
 
-                            print(f"V2 hop {a}->{b}: est_out {estimated_by_pair / (10 ** self.decimals_out)}, impact {impact:.6f}")
-                            if impact > max_price_impact:
-                                raise Exception(
-                                    f"Price impact {impact:.6f} on hop {a}->{b} exceeds limit {max_price_impact}. Aborting for safety.")
+                                price_before = (reserve_out / (10 ** self.decimals_out)) / (
+                                            reserve_in / (10 ** self.decimals_in)) if reserve_in > 0 else float('inf')
+                                price_after = ((reserve_out - estimated_by_pair) / (10 ** self.decimals_out)) / (
+                                            (reserve_in + amount_in) / (10 ** self.decimals_in)) if (reserve_in + amount_in) > 0 else 0
+                                impact = abs(price_after - price_before) / price_before if price_before not in (0, float('inf')) else 1.0
 
-                    else:
-                        raise Exception(
-                            "factoryV2 not available from router — cannot check V2 pair impacts. Aborting for safety.")
+                                print(f"V2 hop {a}->{b}: est_out {estimated_by_pair / (10 ** self.decimals_out)}, impact {impact:.6f}")
+                                if impact > max_price_impact:
+                                    # Escalate price impact limit on retry
+                                    if attempt < max_retries - 1:
+                                        new_impact_limit = min(max_price_impact * (1.5 ** (attempt + 1)), 1.0)
+                                        print(
+                                            f"Impact {impact:.4f} > {max_price_impact:.4f}, retry with limit {new_impact_limit:.4f}")
+                                        raise Exception(f"RETRYABLE_IMPACT: {impact:.4f}")
+                                    else:
+                                        return SwapResult(
+                                            success=False,
+                                            error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
+                                            error_msg=f"Price impact {impact:.4f} too high"
+                                        )
+                    except Exception as e:
+                        if "RETRYABLE_IMPACT" in str(e):
+                            max_price_impact = min(max_price_impact * 1.5, 1.0)
+                            slippage = min(slippage + 0.05, 0.15)
+                            await asyncio.sleep(2)
+                            continue
+                        elif attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
+                                              error_msg=str(e))
+
+                    # else:
+                    #     raise Exception(
+                    #         "factoryV2 not available from router — cannot check V2 pair impacts. Aborting for safety.")
 
                 # --- подготовка транзакции: exactInputSingle или swapExactTokensForTokens ---
                 if chosen_type == 'v3':
@@ -442,7 +500,10 @@ class OkxTrade:
                 # оценка газа (async)
                 try:
                     gas_est = await txn_func.estimate_gas({'from': self.from_addr})
-                except Exception:
+                except Exception as e:
+                    if "insufficient funds" in str(e).lower():
+                        return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_GAS,
+                                          error_msg=f"No gas: {e}")
                     gas_est = 400000
 
                 txn = await txn_func.build_transaction({
@@ -458,17 +519,31 @@ class OkxTrade:
                 receipt = await self.rpc.eth.wait_for_transaction_receipt(tx_hash)
 
                 if receipt.status != 1:
-                    raise Exception(f"Swap failed, tx hash: {tx_hash.hex()}")
+                    if attempt < max_retries - 1:
+                        slippage = min(slippage + 0.05, 0.3)
+                        await asyncio.sleep(3)
+                        continue
+                    else:
+                        return SwapResult(
+                            success=False,
+                            error_type=SwapErrorType.FATAL_TOKEN_ISSUE,
+                            error_msg=f"Swap reverted: {tx_hash.hex()}"
+                        )
 
-                return tx_hash.hex()
+                return SwapResult(success=True, tx_hash=tx_hash.hex())
+
+                # return tx_hash.hex()
             except Exception as e:
-                print(f'Ошибка в совершении транзакции: {e}')
+                print(f'Attempt {attempt + 1} failed: {e}')
                 if attempt < max_retries - 1:
-                    slippage = slippage + (0.005 * (attempt + 1))
-                    print(f"Retrying with slippage {slippage:.2%}...")
-                    await asyncio.sleep(attempt+1)
+                    slippage = min(slippage + 0.05, 0.3)
+                    max_price_impact = min(max_price_impact * 1.5, 1.0)
+                    await asyncio.sleep(2 ** attempt)
                 else:
-                    return 'прошла обратная замена КУПИЛИ ЗАНОВО'
+                    return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY, error_msg=str(e))
+
+            return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
+                              error_msg="Max retries exceeded")
 #
 # if __name__ == "__main__":
 #     import os
