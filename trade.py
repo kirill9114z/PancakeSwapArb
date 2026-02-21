@@ -12,9 +12,7 @@ from web3 import AsyncWeb3, Web3
 
 from exchange import place_limit_order, get_session
 from config import RPC_BSC
-USDT_CONTRACTS = '0x55d398326f99059fF775485246999027B3197955'
-
-USDC_CONTRACTS_2 = '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'
+USDT_CONTRACTS = '0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d'
 
 
 cached = {}
@@ -36,10 +34,10 @@ class Arbitrage:
         self.running = True
 
         self.max_volume = max_volume
-        self.balance_usdt_mexc = 20000
-        self.balance_token_mexc = 7000
-        self.balance_token_dex = 70000
-        self.balance_usdc_dex_bsc = 20000
+        self.balance_usdt_mexc = 0
+        self.balance_token_mexc = 0
+        self.balance_token_dex = 0
+        self.balance_usdc_dex_bsc = 0
         self.native_token = 0
 
 
@@ -49,7 +47,7 @@ class Arbitrage:
         self._withdrawal_fee_cache = {}
         self._cache_lock = asyncio.Lock()
 
-        self.PROFIT_THRESHOLD = -0.5
+        self.PROFIT_THRESHOLD = 10
         self.GLOBAL_SPREAD = -0.1
 
         self.last_alert = {}
@@ -186,172 +184,145 @@ class Arbitrage:
         except Exception as e:
             print(f"Error sending message: {e}")
 
+    async def _safe_fetch_balance(self, max_retries=3, delay=5):
+        for attempt in range(max_retries):
+            try:
+                balance = await self.exchange.fetch_balance()
+                token_name = self.pair.split("/")[0]
+                if 'USDT' in balance['total'] and token_name in balance['total']:
+                    return float(balance['total']['USDT']), float(balance['total'][token_name])
+                return 0.0, 0.0
+            except (ccxt.RequestTimeout, ccxt.NetworkError):
+                if attempt + 1 < max_retries:
+                    await asyncio.sleep(delay)
+            except Exception as e:
+                print(f'ERROR SAFE_FETCH: {e}')
+                break
+        return 0.0, 0.0  # ← всегда tuple!
 
-    # async def _safe_fetch_balance(self, max_retries=3, delay=5):
-    #     """Безопасное получение баланса с MEXC с повторными попытками"""
-    #     for attempt in range(max_retries):
-    #         try:
-    #             balance = await self.exchange.fetch_balance()
-    #             if 'USDT' in balance['total'] and f'{self.pair.split("/")[0]}' in balance['total']:
-    #                 # return float(balance['total']['USDT']), float(balance['total'][self.pair.split("/")[0]])
-    #                 return 2, 4
-    #             return 2, 3
-    #         except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
-    #             if attempt + 1 < max_retries:
-    #                 await asyncio.sleep(delay)
-    #         except Exception as e:
-    #             print(f'ERROR SAFE_FETCH: {e}')
-    #             break
-    #     return 0.0
-    #
-    # async def _safe_get_bnb_balance(self, max_retries=3, delay=5):
-    #     """Получение баланса нативной монеты BNB"""
-    #     for attempt in range(1, max_retries + 1):
-    #         try:
-    #             # Получаем баланс напрямую через web3
-    #             raw_balance = await self.w3.eth.get_balance(
-    #                 self.w3.to_checksum_address(self.owner.address)
-    #             )
-    #             return raw_balance / (10 ** 18)  # BNB имеет 18 десятичных знаков
-    #
-    #         except Exception as e:
-    #             print(f"RPC error in (attempt {attempt}): {e}")
-    #             if attempt < max_retries:
-    #                 await asyncio.sleep(delay)
-    #
-    #     return 0.0
-    #
-    # async def _safe_get_erc20_balance(self, address, decimals, max_retries=3, delay=5):
-    #     print(f' Addres: {self.owner.address}')
-    #     addr = self.w3.to_checksum_address(address)
-    #     contract = self.w3.eth.contract(
-    #         address=addr,
-    #         abi=self.erc20_abi
-    #     )
-    #     # 3) Цикл повторов
-    #     for attempt in range(1, max_retries + 1):
-    #         try:
-    #             # вызвать асинхронно .call()
-    #             raw: int = await contract.functions.balanceOf(
-    #                 self.w3.to_checksum_address(self.owner.address)
-    #             ).call()
-    #             print(f' RES : {raw}  |  {raw/10**18}')
-    #             return (raw / (10**decimals))
-    #             # return (raw / (10**18))
-    #
-    #         except ContractLogicError as e:
-    #             print(f"Contract error: {e}")
-    #             break  # при ошибке контракта повторять не нужно
-    #
-    #         except Exception as e:
-    #             print(f"RPC error in (attempt {attempt}): {e}")
-    #             if attempt < max_retries:
-    #                 await asyncio.sleep(delay)
-    #
-    #     return 0.0
-    #
-    # async def update_balances(self):
-    #     """Обновляет все балансы параллельно"""
-    #     try:
-    #         t = time.time()
-    #         # Создаем задачи для всех балансов
-    #         tasks = [
-    #             self._get_mexc_balances(),
-    #             self._safe_get_bnb_balance(),
-    #             self._get_dex_balances(18)
-    #         ]
-    #
-    #         # Выполняем все задачи параллельно
-    #         results = await asyncio.gather(*tasks, return_exceptions=True)
-    #
-    #         # Обрабатываем результаты
-    #         mexc_balances, bnb_balance, dex_balances = results
-    #
-    #         # Устанавливаем балансы MEXC
-    #         self.balance_usdt_mexc, self.balance_token_mexc = mexc_balances
-    #         self.native_token = bnb_balance
-    #         self.balance_token_dex, self.balance_usdc_dex_bsc = dex_balances
-    #         print(self.balance_usdt_mexc, self.balance_token_mexc)
-    #         print(self.native_token)
-    #         print(self.balance_token_dex, self.balance_usdc_dex_bsc)
-    #         print(f'TIME: {time.time() - t}')
-    #         return True
-    #
-    #     except Exception as e:
-    #         print(f"Failed to update balances: {e}")
-    #         return False
-    #
-    # async def _get_mexc_balances(self):
-    #     """Получает балансы с MEXC"""
-    #     usdt_balance, token_balance = await self._safe_fetch_balance()
-    #     return usdt_balance, token_balance
-    #
-    #
-    # async def _get_dex_balances(self, token_decimals):
-    #     """Получает балансы токенов на DEX параллельно"""
-    #     # Запускаем запросы балансов параллельно
-    #     token_task = self._safe_get_erc20_balance("0xaa036928c9c0Df07d525B55ea8EE690Bb5a628C1", token_decimals)
-    #     usdc_task = self._safe_get_erc20_balance(USDT_CONTRACTS, 18)
-    #
-    #     token_balance, usdc_balance = await asyncio.gather(token_task, usdc_task)
-    #     return token_balance, usdc_balance
+    async def _safe_get_bnb_balance(self, max_retries=3, delay=5):
+        for attempt in range(1, max_retries + 1):
+            try:
+                raw_balance = await self.w3.eth.get_balance(  # ← rpc, не w3
+                    self.w3.to_checksum_address(self.owner.address)
+                )
+                return raw_balance / (10 ** 18)
+            except Exception as e:
+                print(f"RPC error in (attempt {attempt}): {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
+        return 0.0
 
+    async def _safe_get_erc20_balance(self, address, decimals, max_retries=3, delay=5):
+        addr = self.w3.to_checksum_address(address)  # ← rpc, не w3
+        contract = self.w3.eth.contract(address=addr, abi=self.erc20_abi)
+        for attempt in range(1, max_retries + 1):
+            try:
+                raw: int = await contract.functions.balanceOf(
+                    self.w3.to_checksum_address(self.owner.address)
+                ).call()
+                return raw / (10 ** decimals)
+            except ContractLogicError as e:
+                print(f"Contract error: {e}")
+                break
+            except Exception as e:
+                print(f"RPC error in (attempt {attempt}): {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
+        return 0.0
 
-
-
+    async def _get_dex_balances(self, token_decimals):
+        # ✅ Передаём корутины (не await заранее), gather сам параллельно запускает
+        token_balance, usdc_balance = await asyncio.gather(
+            self._safe_get_erc20_balance("0xF74548802f4c700315F019FdE17178b392EE4444", token_decimals),  # ← token_address!
+            self._safe_get_erc20_balance(USDT_CONTRACTS, 18)
+        )
+        return token_balance, usdc_balance
 
     async def update_balances(self):
         try:
-            t0 = time.time()
-            pair_data = self.db.get_pair_data(self.pair)
-
-            token_addresses = [
-                pair_data['contract_bsc'],  # ваш токен
-                USDT_CONTRACTS
-            ]
-            decimals_map = {
-                token_addresses[0]: pair_data['decimals'],
-                token_addresses[1]: 18
-            }
-
-            task_exchange = asyncio.create_task(self._safe_fetch_balance())
-            task_multicall = asyncio.create_task(
-                self._multicall_balances_with_native(token_addresses, self.owner.address, decimals_map)
+            t = time.time()
+            results = await asyncio.gather(
+                self._safe_fetch_balance(),
+                self._safe_get_bnb_balance(),
+                self._get_dex_balances(18),
+                return_exceptions=True
             )
 
-            mexc_res, multicall_res = await asyncio.gather(task_exchange, task_multicall, return_exceptions=True)
+            # Проверка на ошибки в задачах
+            task_names = ['MEXC', 'BNB', 'DEX']
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    print(f"[{task_names[i]}] balance task failed: {result}")
+                    return False
 
-            if isinstance(mexc_res, Exception):
-                print("MEXC task error:", mexc_res)
-                mexc_res = (0.0, 0.0)
+            mexc_balances, bnb_balance, dex_balances = results
+            self.balance_usdt_mexc, self.balance_token_mexc = mexc_balances
+            self.native_token = bnb_balance
+            self.balance_token_dex, self.balance_usdc_dex_bsc = dex_balances
 
-            if isinstance(multicall_res, Exception):
-                print("Multicall task error:", multicall_res)
-                token_dict = {addr: 0.0 for addr in token_addresses}
-                native_val = await self._safe_get_bnb_balance()
-            else:
-                token_dict, native_val = multicall_res
-                if native_val is None:
-                    native_val = await self._safe_get_bnb_balance()
-
-            # if native_val < 0.0007: !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            #     self.running = False
-            #     await self.send_notification(f'Осталось мало BNB, пополните баланс.')
-
-            self.balance_usdt_mexc, self.balance_token_mexc = mexc_res
-            self.native_token = native_val
-            self.balance_token_dex = token_dict.get(token_addresses[0], 0.0)
-            self.balance_usdc_dex_bsc = token_dict.get(token_addresses[1], 0.0)
-
-            print(f"MEXC {self.balance_usdt_mexc, self.balance_token_mexc}")
-            print(f"Native: {self.native_token}")
-            print(f"Dex: {self.balance_token_dex, self.balance_usdc_dex_bsc}")
-            print(f"TIME: {time.time() - t0}")
-
+            print(f"MEXC USDT: {self.balance_usdt_mexc} | Token: {self.balance_token_mexc}")
+            print(f"BNB: {self.native_token}")
+            print(f"DEX Token: {self.balance_token_dex} | USDT: {self.balance_usdc_dex_bsc}")
+            print(f'Update time: {time.time() - t:.3f}s')
             return True
+
         except Exception as e:
             print(f"Failed to update balances: {e}")
             return False
+
+    # async def update_balances(self):
+    #     try:
+    #         t0 = time.time()
+    #         pair_data = self.db.get_pair_data(self.pair)
+    #
+    #         token_addresses = [
+    #             pair_data['contract_bsc'],  # ваш токен
+    #             USDT_CONTRACTS
+    #         ]
+    #         decimals_map = {
+    #             token_addresses[0]: pair_data['decimals'],
+    #             token_addresses[1]: 18
+    #         }
+    #
+    #         task_exchange = asyncio.create_task(self._safe_fetch_balance())
+    #         task_multicall = asyncio.create_task(
+    #             self._multicall_balances_with_native(token_addresses, self.owner.address, decimals_map)
+    #         )
+    #
+    #         mexc_res, multicall_res = await asyncio.gather(task_exchange, task_multicall, return_exceptions=True)
+    #
+    #         if isinstance(mexc_res, Exception):
+    #             print("MEXC task error:", mexc_res)
+    #             mexc_res = (0.0, 0.0)
+    #
+    #         if isinstance(multicall_res, Exception):
+    #             print("Multicall task error:", multicall_res)
+    #             token_dict = {addr: 0.0 for addr in token_addresses}
+    #             native_val = await self._safe_get_bnb_balance()
+    #         else:
+    #             token_dict, native_val = multicall_res
+    #             if native_val is None:
+    #                 native_val = await self._safe_get_bnb_balance()
+    #
+    #         # if native_val < 0.0007: !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    #         #     self.running = False
+    #         #     await self.send_notification(f'Осталось мало BNB, пополните баланс.')
+    #
+    #         self.balance_usdt_mexc, self.balance_token_mexc = mexc_res
+    #         self.native_token = native_val
+    #         self.balance_token_dex = token_dict.get(token_addresses[0], 0.0)
+    #         self.balance_usdc_dex_bsc = token_dict.get(token_addresses[1], 0.0)
+    #
+    #         print(f"MEXC {self.balance_usdt_mexc, self.balance_token_mexc}")
+    #         print(f"Native: {self.native_token}")
+    #         print(f"Dex: {self.balance_token_dex, self.balance_usdc_dex_bsc}")
+    #         print(f"TIME: {time.time() - t0}")
+    #
+    #         return True
+    #     except Exception as e:
+    #         print(f"Failed to update balances: {e}")
+    #         return False
 
 
     # async def update_balances(self):
@@ -366,42 +337,42 @@ class Arbitrage:
     #         return False
 
 
-    async def _safe_fetch_balance(self, max_retries: int = 2, delay: float = 0.5):
-        """
-        Получить балансы с биржи (USDT и токен).
-        """
-        for attempt in range(1, max_retries + 1):
-            try:
-                # таймаут на случай зависания
-                res = await asyncio.wait_for(self.exchange.fetch_balance(), timeout=6)
-                base_symbol = self.pair.split("/")[0]
-                usdt = float(res['total'].get('USDT', 0))
-                token = float(res['total'].get(base_symbol, 0))
-                return usdt, token
-            except asyncio.TimeoutError:
-                print(f"fetch_balance timeout attempt {attempt}")
-            except Exception as e:
-                print(f"ERROR SAFE_FETCH attempt {attempt}: {e}")
-            if attempt < max_retries:
-                await asyncio.sleep(delay)
-        return 0.0, 0.0
-
-    async def _safe_get_bnb_balance(self, max_retries: int = 3, delay: float = 1.0):
-        """
-        Получить баланс нативной монеты (BNB).
-        """
-        for attempt in range(1, max_retries + 1):
-            try:
-                raw = await asyncio.wait_for(
-                    self.w3.eth.get_balance(self.w3.to_checksum_address(self.owner.address)),
-                    timeout=5
-                )
-                return raw / (10 ** 18)
-            except Exception as e:
-                print(f"RPC error in BNB (attempt {attempt}): {e}")
-            if attempt < max_retries:
-                await asyncio.sleep(delay)
-        return 0.0
+    # async def _safe_fetch_balance(self, max_retries: int = 2, delay: float = 0.5):
+    #     """
+    #     Получить балансы с биржи (USDT и токен).
+    #     """
+    #     for attempt in range(1, max_retries + 1):
+    #         try:
+    #             # таймаут на случай зависания
+    #             res = await asyncio.wait_for(self.exchange.fetch_balance(), timeout=6)
+    #             base_symbol = self.pair.split("/")[0]
+    #             usdt = float(res['total'].get('USDT', 0))
+    #             token = float(res['total'].get(base_symbol, 0))
+    #             return usdt, token
+    #         except asyncio.TimeoutError:
+    #             print(f"fetch_balance timeout attempt {attempt}")
+    #         except Exception as e:
+    #             print(f"ERROR SAFE_FETCH attempt {attempt}: {e}")
+    #         if attempt < max_retries:
+    #             await asyncio.sleep(delay)
+    #     return 0.0, 0.0
+    #
+    # async def _safe_get_bnb_balance(self, max_retries: int = 3, delay: float = 1.0):
+    #     """
+    #     Получить баланс нативной монеты (BNB).
+    #     """
+    #     for attempt in range(1, max_retries + 1):
+    #         try:
+    #             raw = await asyncio.wait_for(
+    #                 self.w3.eth.get_balance(self.w3.to_checksum_address(self.owner.address)),
+    #                 timeout=5
+    #             )
+    #             return raw / (10 ** 18)
+    #         except Exception as e:
+    #             print(f"RPC error in BNB (attempt {attempt}): {e}")
+    #         if attempt < max_retries:
+    #             await asyncio.sleep(delay)
+    #     return 0.0
 
     async def _multicall_balances_with_native(self,
                                               token_addresses: list,
@@ -480,27 +451,27 @@ class Arbitrage:
         native_balance = await self.w3.eth.get_balance(wallet_addr) / (10 ** 18)
         return balances, native_balance
 
-    async def _safe_get_erc20_balance(self, address: str, decimals: int,
-                                      max_retries: int = 3, delay: float = 1.0):
-        """
-        Индивидуальный вызов баланса ERC-20. Используется как fallback.
-        """
-        addr = self.w3.to_checksum_address(address)
-        contract = self.w3.eth.contract(address=addr, abi=self.erc20_abi)
-        for attempt in range(1, max_retries + 1):
-            try:
-                raw = await asyncio.wait_for(
-                    contract.functions.balanceOf(self.w3.to_checksum_address(self.owner.address)).call(),
-                    timeout=5
-                )
-                return raw / (10 ** decimals)
-            except asyncio.TimeoutError:
-                print(f"ERC20 balance timeout attempt {attempt} for {address}")
-            except Exception as e:
-                print(f"RPC error ERC20 (attempt {attempt}) for {address}: {e}")
-            if attempt < max_retries:
-                await asyncio.sleep(delay)
-        return 0.0
+    # async def _safe_get_erc20_balance(self, address: str, decimals: int,
+    #                                   max_retries: int = 3, delay: float = 1.0):
+    #     """
+    #     Индивидуальный вызов баланса ERC-20. Используется как fallback.
+    #     """
+    #     addr = self.w3.to_checksum_address(address)
+    #     contract = self.w3.eth.contract(address=addr, abi=self.erc20_abi)
+    #     for attempt in range(1, max_retries + 1):
+    #         try:
+    #             raw = await asyncio.wait_for(
+    #                 contract.functions.balanceOf(self.w3.to_checksum_address(self.owner.address)).call(),
+    #                 timeout=5
+    #             )
+    #             return raw / (10 ** decimals)
+    #         except asyncio.TimeoutError:
+    #             print(f"ERC20 balance timeout attempt {attempt} for {address}")
+    #         except Exception as e:
+    #             print(f"RPC error ERC20 (attempt {attempt}) for {address}: {e}")
+    #         if attempt < max_retries:
+    #             await asyncio.sleep(delay)
+    #     return 0.0
 
 
     async def get_price_mexc(self, session):
@@ -652,18 +623,17 @@ class Arbitrage:
                     if best['type'] == 'BUY_MEXC':
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
-                            print(f'BUY {best} | {fee}')
+                            # print(f'BUY {best} | {fee}')
                             # await self.send_opportunity_alert(best)
                             await self.make_trade(best, session)
                     else:
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
-                            print(f'SEll | {best} | {fee}')
+                            # print(f'SEll | {best} | {fee}')
                             # await self.send_opportunity_alert(best)
                             await self.make_trade(best, session)
                 else:
-                    if okx_buy_price < 0.02:
-                        print(f'one {okx_buy_price} | {okx_sell_price}')
+                    print(f'one {okx_buy_price} | {okx_sell_price}')
                     continue
         except Exception as e:
             self.running = False
@@ -709,8 +679,9 @@ class Arbitrage:
                 else:
                     await self.send_notification(
                         f"❌ КРИТИЧНО! Обратная покупка на MEXC не удалась!\n"
-                        f"Срочно купите вручную ~{status['filled']} токен {self.pair}"
+                        f"Срочно купите вручную ~{status['filled']} токен {self.pair} и перезапустите бота"
                     )
+                    await self.update_balances()
             else:
                 # Неизвестная ошибка
                 await self.send_notification(
@@ -792,72 +763,17 @@ class Arbitrage:
                         if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
-                            # if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                            #     await self.send_notification(
-                            #         f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
-                            #     await asyncio.sleep(300)
-                            #     await self.update_balances()
-                            #     return
-                            # else:
-                            #     print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                            #     notification_text = (
-                            #         f"🔔 Новая сделка! {self.pair}\n"
-                            #         f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                            #         f"Объем: {status['filled']:.2f}\n"
-                            #         f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
-                            #         f"Хэш: {val}"
-                            #     )
-                            #     await self.send_notification(notification_text)
-                            #     await self.update_balances()
-                            #     return
                             await self.handle_swap(val, status, best, symbol, u_id, session)
-                            return 
+                            return
                         if status['status'] == 'closed':
                             print(status)
                             break
                         if status['status'] == "canceled":
                             val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
-                            # if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                            #     await self.send_notification(
-                            #         f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
-                            #     await asyncio.sleep(300)
-                            #     await self.update_balances()
-                            #     return
-                            # else:
-                            #     print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                            #     notification_text = (
-                            #         f"🔔 Новая сделка! {self.pair}\n"
-                            #         f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                            #         f"Объем: {status['filled']:.2f}\n"
-                            #         f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
-                            #         f"Хэш: {val}"
-                            #     )
-                            #     await self.send_notification(notification_text)
-                            #     await self.update_balances()
-                            #     return
                             await self.handle_swap(val, status, best, symbol, u_id, session)
-                            return 
+                            return
                         await asyncio.sleep(0.05)
-                    # 3) DEX swap
                     val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
-                    # if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                    #     await self.send_notification(
-                    #         f'Не получилось сделать транзакцию на Pancake, совершите сделку самостоятельно на dex:\nКупите на {best['dex'] * status['filled']}$ монет {self.pair.split('/')[0]} за 5 мин')
-                    #     await asyncio.sleep(300)
-                    #     await self.update_balances()
-                    #     return
-                    # else:
-                    #     print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                    #     notification_text = (
-                    #         f"🔔 Новая сделка! {self.pair}\n"
-                    #         f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                    #         f"Объем: {status['filled']:.2f}\n"
-                    #         f"Прибыль: ${best['profit']:.2f}\n"
-                    #         f"Хэш: {val}"
-                    #     )
-                    #     await self.send_notification(notification_text)
-                    #     await self.update_balances()
-                    #     return
                     await self.handle_swap(val, status, best, symbol, u_id, session)
                     return
             else:
@@ -878,67 +794,20 @@ class Arbitrage:
                         if time.time() - tim >= 3 and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
-                            if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                                await self.send_notification(
-                                    f'Не получилось сделать транзакцию, Продайте {status['filled']} {self.pair.split("/")[0]} в течении 5 минут')
-                                await asyncio.sleep(300)
-                                await self.update_balances()
-                                return
-                            else:
-                                print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                                notification_text = (
-                                    f"🔔 Новая сделка! {self.pair}\n"
-                                    f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                                    f"Объем: {status['filled']:.2f}\n"
-                                    f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
-                                    f"Хэш: {val}"
-                                )
-                                await self.send_notification(notification_text)
-                                await self.update_balances()
-                                return
+                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            return
                         if status['status'] == 'closed':
                             print(status)
                             break
                         if status['status'] == "canceled":
                             val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
-                            if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                                await self.send_notification(
-                                    f'Не получилось сделать транзакцию, Продайте {status['filled']} {self.pair.split("/")[0]} в течении 5 минут')
-                                await asyncio.sleep(300)
-                                await self.update_balances()
-                                return
-                            else:
-                                print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                                notification_text = (
-                                    f"🔔 Новая сделка! {self.pair}\n"
-                                    f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                                    f"Объем: {status['filled']:.2f}\n"
-                                    f"Прибыль: ${(status['filled'] / best["volume"]) * best['profit']:.2f}\n"
-                                    f"Хэш: {val}"
-                                )
-                                await self.send_notification(notification_text)
-                                await self.update_balances()
-                                return
+                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            return
                         await asyncio.sleep(0.05)
                     # 3) DEX swap
                     val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
-                    if val == 'прошла обратная замена КУПИЛИ ЗАНОВО':
-                        await self.send_notification(f'Не получилось сделать транзакцию, Продайте {status['filled']} {self.pair.split("/")[0]} в течении 5 минут')
-                        await asyncio.sleep(300)
-                        await self.update_balances()
-                        return
-                    else:
-                        print(f'ВСЕ ЗАКОНЧИЛОСЬ {val}')
-                        notification_text = (
-                            f"🔔 Новая сделка! {self.pair}\n"
-                            f"Тип: {'Продажа' if best['type'] == 'SELL_MEXC' else 'Покупка'}\n"
-                            f"Объем: {best['volume']:.2f}\n"
-                            f"Прибыль: ${best['profit']:.2f}\n"
-                            f"Хэш: {val}"
-                        )
-                        await self.send_notification(notification_text)
-                        await self.update_balances()
-                        return
+                    await self.handle_swap(val, status, best, symbol, u_id, session)
+                    return
         except Exception as e:
             print(f'Error in make_trade: {e}')
 
