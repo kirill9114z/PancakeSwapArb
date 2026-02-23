@@ -7,12 +7,11 @@ import aiohttp
 from web3 import AsyncWeb3, AsyncHTTPProvider, Web3
 from web3.eth import AsyncEth
 from python_socks import ProxyType
-from web3_proxy_providers import AsyncWebsocketWithProxyProvider
+# from web3_proxy_providers import AsyncWebsocketWithProxyProvider
 from eth_account import Account
 
 import asyncio
 from decimal import Decimal, getcontext
-from config import RPC_BSC
 import os
 import websockets
 
@@ -153,12 +152,12 @@ class OkxTrade:
         if abs(float(price_corr) - self.rak) <= self.rak * 0.5:
             if amount0 < 0:
                 self.rak = float(price_corr)
-                self.buy = float(price_corr)
+                self.buy = float(price_corr) * 0.9995
                 # self.sell = float(price_corr)
             if amount1 < 0:
                 self.rak = float(price_corr)
                 # self.buy = float(price_corr)
-                self.sell = float(price_corr)
+                self.sell = float(price_corr) * 0.9995
 
     async def get_rak(self, side, contract):
         # contract = self.rpc.eth.contract(address=self.address, abi=self.abi)
@@ -253,7 +252,7 @@ class OkxTrade:
             token_in: str,
             token_out: str,
             amount_in_human: float,
-            slippage: float = 0.05,
+            slippage: float = 0.005,
             max_price_impact: float = 0.5,
             min_profit_percent: float = 0.0,
             max_retries: int = 3
@@ -377,7 +376,7 @@ class OkxTrade:
 
                 # Проверка min_profit_percent
                 if min_profit_percent > 0:
-                    MIN_OUTPUT_PERCENT = 0.95  # 95% от ожидаемого (5% допустимый slippage)
+                    MIN_OUTPUT_PERCENT = 0.97  # 95% от ожидаемого (5% допустимый slippage)
 
                     expected_output_human = chosen_amount_out_est / (10 ** self.decimals_out)
                     min_output_human = expected_output_human * MIN_OUTPUT_PERCENT
@@ -461,7 +460,7 @@ class OkxTrade:
                     except Exception as e:
                         if "RETRYABLE_IMPACT" in str(e):
                             max_price_impact = min(max_price_impact * 1.5, 1.0)
-                            slippage = min(slippage + 0.05, 0.15)
+                            slippage = min(slippage + 0.005, 0.05)
                             await asyncio.sleep(2)
                             continue
                         elif attempt < max_retries - 1:
