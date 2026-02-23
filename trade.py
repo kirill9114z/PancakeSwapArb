@@ -11,7 +11,6 @@ from pancake_trade import OkxTrade
 from web3 import AsyncWeb3, Web3
 
 from exchange import place_limit_order, get_session
-from config import RPC_BSC
 USDT_CONTRACTS = '0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d'
 
 
@@ -47,7 +46,7 @@ class Arbitrage:
         self._withdrawal_fee_cache = {}
         self._cache_lock = asyncio.Lock()
 
-        self.PROFIT_THRESHOLD = 10
+        self.PROFIT_THRESHOLD = 0.2
         self.GLOBAL_SPREAD = -0.1
 
         self.last_alert = {}
@@ -258,8 +257,12 @@ class Arbitrage:
 
             mexc_balances, bnb_balance, dex_balances = results
             self.balance_usdt_mexc, self.balance_token_mexc = mexc_balances
-            self.native_token = bnb_balance
+            self.balance_usdt_mexc *= 0.99
+            self.balance_token_mexc *= 0.99
+            self.native_token = bnb_balance * 0.99
             self.balance_token_dex, self.balance_usdc_dex_bsc = dex_balances
+            self.balance_usdc_dex_bsc *= 0.99
+            self.balance_token_dex *= 0.99
 
             print(f"MEXC USDT: {self.balance_usdt_mexc} | Token: {self.balance_token_mexc}")
             print(f"BNB: {self.native_token}")
@@ -543,6 +546,7 @@ class Arbitrage:
 
         spread = self.db.get_pair_spread(self.pair)
         curr_spread = spread if spread else self.db.get_global_spread()
+        print(f'SPREAD {self.pair}: {curr_spread} and {spread}')
         try:
             while self.running == True:
                 t = time.time()
@@ -615,7 +619,6 @@ class Arbitrage:
 
                 if candidates:
                     best = max(candidates, key=lambda x: x['profit'])
-                    print(f'10: {best}')
                     # fee = calculate_total_gas_cost(id3[best['chain_id']], cureent, best['volume'])
                     # best['profit'] = best['profit'] - fee
                     # print(f'1: {best}')
@@ -625,15 +628,16 @@ class Arbitrage:
                         if best['profit'] >= self.PROFIT_THRESHOLD:
                             # print(f'BUY {best} | {fee}')
                             # await self.send_opportunity_alert(best)
+                            print(f'10: {best}')
                             await self.make_trade(best, session)
                     else:
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
                             # print(f'SEll | {best} | {fee}')
                             # await self.send_opportunity_alert(best)
+                            print(f'10: {best}')
                             await self.make_trade(best, session)
                 else:
-                    print(f'one {okx_buy_price} | {okx_sell_price}')
                     continue
         except Exception as e:
             self.running = False
@@ -744,7 +748,6 @@ class Arbitrage:
         curr_pair = self.pair.split('/')
         symbol = f"{curr_pair[0]}_{curr_pair[1]}"
         u_id = self.db.get_uid(self.pair)
-        best['volume'] = 100
         try:
             if best['type'] == 'SELL_MEXC':
                 order = await place_limit_order(symbol, best['price'], best['volume'], True, u_id, session)
@@ -757,16 +760,16 @@ class Arbitrage:
                     tim = time.time()
                     while True:
                         status = await self.exchange.fetch_order(order_id, self.pair)
-                        if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] == 0:
+                        if time.time() - tim >= 3 and status['status'] == 'open' and status['filled'] == 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             return
-                        if time.time() - tim >= 1 and status['status'] == 'open' and status['filled'] > 0:
+                        if time.time() - tim >= 3 and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
                             await self.handle_swap(val, status, best, symbol, u_id, session)
                             return
                         if status['status'] == 'closed':
-                            print(status)
+                            print(f"STATUS CLOSED: {status}")
                             break
                         if status['status'] == "canceled":
                             val = await self.pancakce.swap_universal_async(USDT_CONTRACTS, self.address, best['dex'] * status['filled'])
@@ -797,7 +800,7 @@ class Arbitrage:
                             await self.handle_swap(val, status, best, symbol, u_id, session)
                             return
                         if status['status'] == 'closed':
-                            print(status)
+                            print(f"STATUS CLOSED: {status}")
                             break
                         if status['status'] == "canceled":
                             val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
@@ -810,4 +813,3 @@ class Arbitrage:
                     return
         except Exception as e:
             print(f'Error in make_trade: {e}')
-
