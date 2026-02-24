@@ -152,12 +152,12 @@ class OkxTrade:
         if abs(float(price_corr) - self.rak) <= self.rak * 0.5:
             if amount0 < 0:
                 self.rak = float(price_corr)
-                self.buy = float(price_corr) * 0.9995
+                self.buy = float(price_corr) * 1.005
                 # self.sell = float(price_corr)
             if amount1 < 0:
                 self.rak = float(price_corr)
                 # self.buy = float(price_corr)
-                self.sell = float(price_corr) * 0.9995
+                self.sell = float(price_corr) * 0.995
 
     async def get_rak(self, side, contract):
         # contract = self.rpc.eth.contract(address=self.address, abi=self.abi)
