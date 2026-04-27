@@ -7,7 +7,6 @@ import aiohttp
 from web3 import AsyncWeb3, AsyncHTTPProvider, Web3
 from web3.eth import AsyncEth
 from python_socks import ProxyType
-# from web3_proxy_providers import AsyncWebsocketWithProxyProvider
 from eth_account import Account
 
 import asyncio
@@ -18,7 +17,6 @@ import websockets
 os.environ["wss_proxy"] = "http://23.95.150.145:6114:feckkgft:a60ezsm8sq3h"
 os.environ["no_proxy"] = "localhost,127.0.0.1"
 
-# Сессия с connection pool и таймаутами
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
 
@@ -54,7 +52,6 @@ class OkxTrade:
         self.private_key = private_key
         self.rak = rak
         self.wss = wss
-        # self.w3 = Web3(Web3.LegacyWebSocketProvider(wss))
         self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(wss))
         loop = asyncio.get_event_loop()
         self.USDT_ADDRESS = "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
@@ -87,7 +84,6 @@ class OkxTrade:
         global _session
         async with _session_lock:
             if _session is None or _session.closed:
-                # Создаем коннектор с настройками прокси
                 connector = aiohttp.TCPConnector(
                     limit=50,
                     ttl_dns_cache=300,
@@ -139,31 +135,23 @@ class OkxTrade:
 
     async def handle_event(self, e, side1):
         args = e["args"]
-        # print(f'ARGS!!!!: {args}')
         amount0 = args['amount0']
         amount1 = args['amount1']
         sqrtPriceX96 = args["sqrtPriceX96"]
         raw_price = await self.sqrtPriceX96_to_price(sqrtPriceX96)
         price_corr = 1 / (await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out) if side1
                       else await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out))
-        # print(f'Corr: {price_corr}')
-        # if abs(float(price_corr) - self.rak) <= self.rak * 0.1:
-        # price_corr = 1 / price_corr
         if abs(float(price_corr) - self.rak) <= self.rak * 0.5:
             if amount0 < 0:
                 self.rak = float(price_corr)
                 self.buy = float(price_corr) * 1.005
-                # self.sell = float(price_corr)
             if amount1 < 0:
                 self.rak = float(price_corr)
-                # self.buy = float(price_corr)
                 self.sell = float(price_corr) * 0.995
 
     async def get_rak(self, side, contract):
-        # contract = self.rpc.eth.contract(address=self.address, abi=self.abi)
 
         try:
-            # 1) Определяем тип пула по ABI
             has_slot0 = any(item.get("type") == "function" and item.get("name") == "slot0" for item in self.abi)
 
             if has_slot0:
@@ -195,20 +183,17 @@ class OkxTrade:
         pool = self.rpc.eth.contract(address=self.address, abi=self.abi)
         side = await self.side(pool)
         self.rak = await self.get_rak(side, pool)
-        # self.rak = 1/self.rak
         print(f"rak: {self.rak} {self.pair}")
         if side is None:
             print("side1 is None, невозможна работа")
             return
 
-        # первый коннект и фильтр
         await self.w3.provider.connect()
         swap_filter = await pool.events.Swap.create_filter(from_block="latest")
 
         try:
             while self.running:
                 try:
-                    # Проверка коннекта раз в цикл
                     if not await self.w3.provider.is_connected():
                         await self.w3.provider.disconnect()
                         await self.w3.provider.connect()
@@ -219,9 +204,9 @@ class OkxTrade:
                     for e in events:
                         if not self.running:
                             break
-                        await self.handle_event(e, side) #обратно заменить
+                        await self.handle_event(e, side) 
 
-                    await asyncio.sleep(0.05)  # чуть больше пауза, разгрузка loop
+                    await asyncio.sleep(0.05) 
 
                 except (websockets.ConnectionClosedError, OSError) as e:
                     print(f"WS disconnected: {e}. Reconnecting in {backoff}s")
@@ -233,7 +218,6 @@ class OkxTrade:
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 30)
 
-                    # после паузы — новый коннект и фильтр
                     await self.w3.provider.connect()
                     swap_filter = await pool.events.Swap.create_filter(from_block="latest")
 
@@ -267,18 +251,15 @@ class OkxTrade:
                 amount_in = int(amount_in_human * (10 ** int(decimals)))
 
 
-                # --- nonce & allowance ---
                 nonce = await self.rpc.eth.get_transaction_count(self.from_addr)
                 allowance = await token_in_contract.functions.allowance(self.from_addr, self.router_addr).call()
                 if allowance < amount_in:
-                    # build approve tx (build_transaction синхронный, но недолго)
                     tx = await token_in_contract.functions.approve(self.router_addr, 2**100).build_transaction({
                         'from': self.from_addr,
                         'nonce': nonce,
                         'gasPrice': await self.rpc.eth.gas_price,
                         'gas': 100000,
                     })
-                    # sign in thread (blocking)
                     signed = await asyncio.to_thread(Account.sign_transaction, tx, self.private_key)
                     txh = await self.rpc.eth.send_raw_transaction(signed.raw_transaction)
                     receipt = await self.rpc.eth.wait_for_transaction_receipt(txh)
@@ -300,7 +281,6 @@ class OkxTrade:
                     [token_in_addr, self.WBNB, token_out_addr],
                 ]
 
-                # === 1) Estimate V3 (exactInputSingle) concurrently for fees ===
                 amount_out_est_v3 = 0
                 v3_fee_used: Optional[int] = None
                 common_fees = [100, 500, 2500, 3000]
@@ -317,12 +297,9 @@ class OkxTrade:
                             1,
                             0
                         )
-                        # Contract call is awaitable in AsyncWeb3
                         res = await self.router.functions.exactInputSingle(params).call({'from': self.from_addr})
-                        # res может быть int или tuple
                         res_val = int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
                         debug.append(f"V3 exactInputSingle fee {fee} -> {res_val}")
-                        # обновляем общий максимум
                         if res_val > amount_out_est_v3:
                             amount_out_est_v3 = res_val
                             v3_fee_used = fee
@@ -331,7 +308,6 @@ class OkxTrade:
 
                 await asyncio.gather(*(try_v3_fee(f) for f in common_fees))
 
-                # === 2) Estimate V2 (swapExactTokensForTokens) concurrently for paths ===
                 amount_out_est_v2 = 0
                 v2_path_used = None
 
@@ -370,19 +346,16 @@ class OkxTrade:
                     chosen_amount_out_est = amount_out_est_v2
                     debug.append(f"Chosen V2 path {v2_path_used} amount_out_est {chosen_amount_out_est/(10**self.decimals_out)}")
 
-                # for m in debug:
-                #     print(m)
                 amount_out_min = int(chosen_amount_out_est * (1 - slippage))
 
-                # Проверка min_profit_percent
                 if min_profit_percent > 0:
-                    MIN_OUTPUT_PERCENT = 0.97  # 95% от ожидаемого (5% допустимый slippage)
+                    MIN_OUTPUT_PERCENT = 0.97  
 
                     expected_output_human = chosen_amount_out_est / (10 ** self.decimals_out)
                     min_output_human = expected_output_human * MIN_OUTPUT_PERCENT
                     min_output_wei = int(min_output_human * (10 ** self.decimals_out))
 
-                    amount_out_min = min_output_wei  # Для роутера
+                    amount_out_min = min_output_wei  
 
                     if chosen_amount_out_est < min_output_wei:
                         raise Exception(
@@ -391,7 +364,6 @@ class OkxTrade:
                             f"получено {chosen_amount_out_est / (10 ** self.decimals_out):.2f}"
                         )
 
-                # Если V2 — проверяем пары и price impact (последовательно, т.к. читаем состояние)
                 if chosen_type == 'v2':
                     try:
                         factory_v2 = await self.router.functions.factoryV2().call()
@@ -432,7 +404,7 @@ class OkxTrade:
                                     reserve_in = r1
                                     reserve_out = r0
 
-                                fee_multiplier_num = 10000 - 25  # 0.25% fee
+                                fee_multiplier_num = 10000 - 25  
                                 numerator = amount_in * fee_multiplier_num * reserve_out
                                 denominator = reserve_in * 10000 + amount_in * fee_multiplier_num
                                 estimated_by_pair = numerator // denominator if denominator > 0 else 0
@@ -445,7 +417,6 @@ class OkxTrade:
 
                                 print(f"V2 hop {a}->{b}: est_out {estimated_by_pair / (10 ** self.decimals_out)}, impact {impact:.6f}")
                                 if impact > max_price_impact:
-                                    # Escalate price impact limit on retry
                                     if attempt < max_retries - 1:
                                         new_impact_limit = min(max_price_impact * (1.5 ** (attempt + 1)), 1.0)
                                         print(
@@ -470,11 +441,6 @@ class OkxTrade:
                             return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
                                               error_msg=str(e))
 
-                    # else:
-                    #     raise Exception(
-                    #         "factoryV2 not available from router — cannot check V2 pair impacts. Aborting for safety.")
-
-                # --- подготовка транзакции: exactInputSingle или swapExactTokensForTokens ---
                 if chosen_type == 'v3':
                     if v3_fee_used is None:
                         raise Exception("No usable V3 fee / estimation found though chosen_type==v3")
@@ -496,7 +462,6 @@ class OkxTrade:
                         self.from_addr
                     )
 
-                # оценка газа (async)
                 try:
                     gas_est = await txn_func.estimate_gas({'from': self.from_addr})
                 except Exception as e:
@@ -512,7 +477,6 @@ class OkxTrade:
                     'nonce': nonce,
                 })
 
-                # sign (in thread) и отправка
                 signed_txn = await asyncio.to_thread(Account.sign_transaction, txn, self.private_key)
                 tx_hash = await self.rpc.eth.send_raw_transaction(signed_txn.raw_transaction)
                 receipt = await self.rpc.eth.wait_for_transaction_receipt(tx_hash)
@@ -531,7 +495,6 @@ class OkxTrade:
 
                 return SwapResult(success=True, tx_hash=tx_hash.hex())
 
-                # return tx_hash.hex()
             except Exception as e:
                 print(f'Attempt {attempt + 1} failed: {e}')
                 if attempt < max_retries - 1:
@@ -543,11 +506,3 @@ class OkxTrade:
 
             return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
                               error_msg="Max retries exceeded")
-#
-# if __name__ == "__main__":
-#     import os
-#
-#     print(os.environ.get("http_proxy"))
-#     print(os.environ.get("https_proxy"))
-#     print(os.environ.get("HTTP_PROXY"))
-#     print(os.environ.get("HTTPS_PROXY"))
