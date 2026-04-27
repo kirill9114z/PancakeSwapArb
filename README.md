@@ -77,10 +77,6 @@ sudo systemctl start arbitrage-bot
 | `CHECK_INTERVAL` | Интервал проверки (сек) | 2 |
 | `GAS_PRICE_GWEI` | Цена газа (Gwei) | auto |
 
-## 📊 Мониторинг
-Статус: journalctl -u arbitrage-bot -f
-Логи: tail -f bot.log
-База: psql -d arbitrage -c "SELECT * FROM trades ORDER BY created_at DESC LIMIT 10;"
 
 
 ## 🛡️ Важные предупреждения ⚠️
