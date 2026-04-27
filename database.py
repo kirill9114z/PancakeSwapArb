@@ -7,10 +7,8 @@ class Database:
         self.db_name = db_name
         self._init_db()
 
-    # database.py - обновленная структура
     def _init_db(self):
         with closing(self._get_connection()) as conn:
-            # НОВАЯ таблица пар с расширенными полями
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS pairs (
                     id INTEGER PRIMARY KEY,
@@ -29,7 +27,6 @@ class Database:
                 )
             ''')
 
-            # Остальные таблицы без изменений
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS spreads (
                     id INTEGER PRIMARY KEY,
@@ -45,7 +42,6 @@ class Database:
                 )
             ''')
 
-            # Инициализация глобального спреда
             if not conn.execute('SELECT 1 FROM global_spread').fetchone():
                 conn.execute('INSERT INTO global_spread (value) VALUES (1.0)')
             conn.commit()
@@ -66,7 +62,6 @@ class Database:
         self._init_db()
         return True
 
-    # Добавляем методы для работы с флагом обновления UID
     def set_uid_update_flag(self, value: bool):
         with closing(self._get_connection()) as conn:
             conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
@@ -82,7 +77,7 @@ class Database:
     def set_uid(self, uid_value):
         """Устанавливает U_ID (всегда одна запись)"""
         with closing(self._get_connection()) as conn:
-            conn.execute('DELETE FROM uid')  # Очищаем предыдущее значение
+            conn.execute('DELETE FROM uid')  
             conn.execute('INSERT INTO uid (value) VALUES (?)', (uid_value,))
             conn.commit()
 
@@ -159,7 +154,6 @@ class Database:
                                    (pair_name.upper(),)).fetchone()
             if pair_id:
                 pair_id = pair_id[0]
-                # Удаляем старый спред если существует
                 conn.execute('DELETE FROM spreads WHERE pair_id = ?', (pair_id,))
                 conn.execute('INSERT INTO spreads (pair_id, value) VALUES (?, ?)',
                              (pair_id, value))
@@ -188,7 +182,6 @@ class Database:
             row = conn.execute('SELECT private_key_encrypted FROM uid LIMIT 1').fetchone()
             return row[0] if row else None
 
-    # database.py - новые методы
     def add_pair_v2(self, name, contract_bsc, decimals, address_contract, abi, mexc_api_key, mexc_api_secret, mexc_uid,
                     private_key, rpc,
                     websocket, volume):
@@ -245,7 +238,6 @@ class Database:
             return None
 
     def remove_pair_v2(self, name):
-        """Удаляет пару"""
         with closing(self._get_connection()) as conn:
             cursor = conn.execute('DELETE FROM pairs WHERE name = ?', (name.upper(),))
             conn.commit()
@@ -256,7 +248,6 @@ class Database:
     def update_pair_mexc_uid(self, pair_name: str, new_uid: str) -> bool:
         with closing(self._get_connection()) as conn:
             try:
-                # Проверяем существование пары
                 cursor = conn.execute(
                     'SELECT id FROM pairs WHERE name = ?',
                     (pair_name.upper(),)
@@ -267,7 +258,6 @@ class Database:
                     print(f"Пара '{pair_name}' не найдена в базе данных")
                     return False
 
-                # Обновляем только mexc_uid
                 cursor = conn.execute(
                     'UPDATE pairs SET mexc_uid = ? WHERE name = ?',
                     (new_uid, pair_name.upper())
@@ -286,12 +276,3 @@ class Database:
                 return False
 
 
-if __name__ == "__main__":
-    d = Database()
-    d.clear_database()
-    # res1 = d.remove_pair_v2('EVAA/USDT')
-    # res2 = d.get_all_pairs()
-    res = d.get_pair_data('EVAA/USDT')
-    # res = d.get_uid('EVAA/USDT')
-    # res = d.get_pair_spread("EVAA/USDT")
-    print(f'kak: {res}')
