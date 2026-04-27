@@ -20,11 +20,8 @@ async def monitor_pair(pair_name, db, chat_id, bot):
     """Запускает мониторинг для конкретной пары"""
     logger.info(f"Starting monitoring for {pair_name}")
 
-    # Получаем контракты для пары
-    # contracts = db.get_pair_contracts(pair_name)
 
     pair_data = db.get_pair_data(pair_name)
-    # abi = pair_data['abi']
     rak = 1.623
     mexc_client = ccxt.mexc({
         'apiKey': pair_data['mexc_api_key'],
@@ -32,13 +29,11 @@ async def monitor_pair(pair_name, db, chat_id, bot):
         'enableRateLimit': True,
         'timeout': 30000
     })
-    # def __init__(self, exchange, pair, pancakce, privat_key, address, rpc, bot, chat_id, db):
     pancake = OkxTrade(pair_name, pair_data['address_contract'], pair_data['abi'], pair_data['decimals'], rak, pair_data["private_key"], pair_data["websocket"], pair_data['rpc'] ,db)
     arbitrage = Arbitrage(mexc_client, pair_name, pancake, pair_data["private_key"], pair_data['contract_bsc'],pair_data["rpc"], bot, chat_id, db, pair_data['volume'])
     active_arbitrage_instances[pair_name] = arbitrage
     arbitrage.running = True
     pancake.running = True
-    # Создаем экземпляр арбитражного бота для пары
     await asyncio.sleep(20)
     await arbitrage.update_balances()
     try:
@@ -79,7 +74,6 @@ async def main(chat_id, bot):
         for pair in pairs:
             task = asyncio.create_task(monitor_pair(pair, db, chat_id, bot))
             tasks.append(task)
-        # Запускаем все задачи параллельно
         await asyncio.gather(*tasks)
     except Exception as e:
         logger.exception(f"Critical error in main: {e}")
