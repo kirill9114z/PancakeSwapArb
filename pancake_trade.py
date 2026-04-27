@@ -14,8 +14,6 @@ from decimal import Decimal, getcontext
 import os
 import websockets
 
-os.environ["wss_proxy"] = "http://23.95.150.145:6114:feckkgft:a60ezsm8sq3h"
-os.environ["no_proxy"] = "localhost,127.0.0.1"
 
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
