@@ -16,7 +16,6 @@ USDT_CONTRACTS = '0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d'
 
 cached = {}
 class Arbitrage:
-    # def __init__(self, exchange, pair, pancakce, db, chat_id, bot, privat_key):
     def __init__(self, exchange, pair, pancakce, privat_key, address, rpc, bot, chat_id, db, max_volume):
         self.exchange = exchange
         self.pair = pair
@@ -24,7 +23,6 @@ class Arbitrage:
         self.pancakce = pancakce
         self.private_key = privat_key
         self.owner = Account.from_key(self.private_key)
-        # self.owner = Keypair.from_base58_string(self.private_key)
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc))
         self.bot = bot
         self.chat_id = chat_id
@@ -90,18 +88,15 @@ class Arbitrage:
             available_volume = min(volume, remaining / price)
             new_cost = total_cost + available_volume * price
 
-            # Корректировка объема, если сумма превышает max_sum
             if new_cost > max_sum:
                 available_volume = (max_sum - total_cost) / price
                 new_cost = total_cost + available_volume * price
 
-            # Обновляем итоговые значения
             total_amount += available_volume
             total_cost = new_cost
 
-            # Сохраняем среднюю цену и цену текущего ордера
             avg_price = total_cost / total_amount if total_amount else price
-            avg_prices.append((avg_price, price))  # Кортеж из двух значений
+            avg_prices.append((avg_price, price)) 
 
             cum_amounts.append(total_amount)
             cum_costs.append(total_cost)
@@ -132,15 +127,14 @@ class Arbitrage:
         profit = opportunity['profit']
         spread = opportunity['spread']
 
-        # Определяем направление сделки
         direction = "MEXC⬆️ → DEX⬇️" if opp_type == 'BUY_MEXC' else "OKX⬆️ → DEX⬇️"
 
         def format_price(p):
             if float(p) == 0:
                 return "0"
             if float(p) < 0.0001:
-                s = f"{p:.20f}"  # Преобразуем в строку с 20 знаками
-                s_clean = s.rstrip('0').rstrip('.')  # Убираем хвостовые нули
+                s = f"{p:.20f}"  
+                s_clean = s.rstrip('0').rstrip('.') 
 
                 if '.' in s_clean and s_clean.split('.')[0] == '0':
                     fractional = s_clean.split('.')[1]
@@ -151,18 +145,15 @@ class Arbitrage:
                             zeros += 1
                         else:
                             break
-                    # Если нулей >=5 и есть значащие цифры
                     if zeros >= 4 and zeros < len(fractional):
-                        return f"0.{{{zeros}}}{fractional[zeros:zeros + 8]}"  # Берем до 8 значащих цифр
+                        return f"0.{{{zeros}}}{fractional[zeros:zeros + 8]}"  
                 return f"{s_clean:.8f}".rstrip('0')
             else:
-                # Для обычных цен убираем лишние нули
                 return f"{p:.8f}".rstrip('0')
 
         mexc_price_str = format_price(mexc_price)
         okx_price_str = format_price(okx_price)
 
-        # Создаем текст сообщения
         message_text = (
             f"🚀 *Арбитражная возможность!*\n\n"
             f"*Направление:* {direction}\n"
@@ -197,12 +188,12 @@ class Arbitrage:
             except Exception as e:
                 print(f'ERROR SAFE_FETCH: {e}')
                 break
-        return 0.0, 0.0  # ← всегда tuple!
+        return 0.0, 0.0  
 
     async def _safe_get_bnb_balance(self, max_retries=3, delay=5):
         for attempt in range(1, max_retries + 1):
             try:
-                raw_balance = await self.w3.eth.get_balance(  # ← rpc, не w3
+                raw_balance = await self.w3.eth.get_balance(  
                     self.w3.to_checksum_address(self.owner.address)
                 )
                 return raw_balance / (10 ** 18)
@@ -213,7 +204,7 @@ class Arbitrage:
         return 0.0
 
     async def _safe_get_erc20_balance(self, address, decimals, max_retries=3, delay=5):
-        addr = self.w3.to_checksum_address(address)  # ← rpc, не w3
+        addr = self.w3.to_checksum_address(address) 
         contract = self.w3.eth.contract(address=addr, abi=self.erc20_abi)
         for attempt in range(1, max_retries + 1):
             try:
@@ -231,9 +222,8 @@ class Arbitrage:
         return 0.0
 
     async def _get_dex_balances(self, token_decimals):
-        # ✅ Передаём корутины (не await заранее), gather сам параллельно запускает
         token_balance, usdc_balance = await asyncio.gather(
-            self._safe_get_erc20_balance("0xF74548802f4c700315F019FdE17178b392EE4444", token_decimals),  # ← token_address!
+            self._safe_get_erc20_balance("0xF74548802f4c700315F019FdE17178b392EE4444", token_decimals),  
             self._safe_get_erc20_balance(USDT_CONTRACTS, 18)
         )
         return token_balance, usdc_balance
@@ -248,7 +238,6 @@ class Arbitrage:
                 return_exceptions=True
             )
 
-            # Проверка на ошибки в задачах
             task_names = ['MEXC', 'BNB', 'DEX']
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
@@ -274,108 +263,7 @@ class Arbitrage:
             print(f"Failed to update balances: {e}")
             return False
 
-    # async def update_balances(self):
-    #     try:
-    #         t0 = time.time()
-    #         pair_data = self.db.get_pair_data(self.pair)
-    #
-    #         token_addresses = [
-    #             pair_data['contract_bsc'],  # ваш токен
-    #             USDT_CONTRACTS
-    #         ]
-    #         decimals_map = {
-    #             token_addresses[0]: pair_data['decimals'],
-    #             token_addresses[1]: 18
-    #         }
-    #
-    #         task_exchange = asyncio.create_task(self._safe_fetch_balance())
-    #         task_multicall = asyncio.create_task(
-    #             self._multicall_balances_with_native(token_addresses, self.owner.address, decimals_map)
-    #         )
-    #
-    #         mexc_res, multicall_res = await asyncio.gather(task_exchange, task_multicall, return_exceptions=True)
-    #
-    #         if isinstance(mexc_res, Exception):
-    #             print("MEXC task error:", mexc_res)
-    #             mexc_res = (0.0, 0.0)
-    #
-    #         if isinstance(multicall_res, Exception):
-    #             print("Multicall task error:", multicall_res)
-    #             token_dict = {addr: 0.0 for addr in token_addresses}
-    #             native_val = await self._safe_get_bnb_balance()
-    #         else:
-    #             token_dict, native_val = multicall_res
-    #             if native_val is None:
-    #                 native_val = await self._safe_get_bnb_balance()
-    #
-    #         # if native_val < 0.0007: !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    #         #     self.running = False
-    #         #     await self.send_notification(f'Осталось мало BNB, пополните баланс.')
-    #
-    #         self.balance_usdt_mexc, self.balance_token_mexc = mexc_res
-    #         self.native_token = native_val
-    #         self.balance_token_dex = token_dict.get(token_addresses[0], 0.0)
-    #         self.balance_usdc_dex_bsc = token_dict.get(token_addresses[1], 0.0)
-    #
-    #         print(f"MEXC {self.balance_usdt_mexc, self.balance_token_mexc}")
-    #         print(f"Native: {self.native_token}")
-    #         print(f"Dex: {self.balance_token_dex, self.balance_usdc_dex_bsc}")
-    #         print(f"TIME: {time.time() - t0}")
-    #
-    #         return True
-    #     except Exception as e:
-    #         print(f"Failed to update balances: {e}")
-    #         return False
-
-
-    # async def update_balances(self):
-    #     try:
-    #         self.balance_usdt_mexc, self.balance_token_mexc = 10000, 500
-    #         self.native_token = 0.1
-    #         self.balance_token_dex = 10000
-    #         self.balance_usdc_dex_bsc = 500
-    #         return True
-    #     except Exception as e:
-    #         print(f"Failed to update balances: {e}")
-    #         return False
-
-
-    # async def _safe_fetch_balance(self, max_retries: int = 2, delay: float = 0.5):
-    #     """
-    #     Получить балансы с биржи (USDT и токен).
-    #     """
-    #     for attempt in range(1, max_retries + 1):
-    #         try:
-    #             # таймаут на случай зависания
-    #             res = await asyncio.wait_for(self.exchange.fetch_balance(), timeout=6)
-    #             base_symbol = self.pair.split("/")[0]
-    #             usdt = float(res['total'].get('USDT', 0))
-    #             token = float(res['total'].get(base_symbol, 0))
-    #             return usdt, token
-    #         except asyncio.TimeoutError:
-    #             print(f"fetch_balance timeout attempt {attempt}")
-    #         except Exception as e:
-    #             print(f"ERROR SAFE_FETCH attempt {attempt}: {e}")
-    #         if attempt < max_retries:
-    #             await asyncio.sleep(delay)
-    #     return 0.0, 0.0
-    #
-    # async def _safe_get_bnb_balance(self, max_retries: int = 3, delay: float = 1.0):
-    #     """
-    #     Получить баланс нативной монеты (BNB).
-    #     """
-    #     for attempt in range(1, max_retries + 1):
-    #         try:
-    #             raw = await asyncio.wait_for(
-    #                 self.w3.eth.get_balance(self.w3.to_checksum_address(self.owner.address)),
-    #                 timeout=5
-    #             )
-    #             return raw / (10 ** 18)
-    #         except Exception as e:
-    #             print(f"RPC error in BNB (attempt {attempt}): {e}")
-    #         if attempt < max_retries:
-    #             await asyncio.sleep(delay)
-    #     return 0.0
+   
 
     async def _multicall_balances_with_native(self,
                                               token_addresses: list,
@@ -389,7 +277,6 @@ class Arbitrage:
         wallet_addr = self.w3.to_checksum_address(wallet_address)
         calls = []
 
-        # токены
         for ta in token_addresses:
             token_contract = self.w3.eth.contract(
                 address=self.w3.to_checksum_address(ta),
@@ -405,11 +292,9 @@ class Arbitrage:
 
         try:
             result = await mc.functions.aggregate(calls).call()
-            # _, return_data_list = result
             return_data_list = result[1]
         except Exception as e:
             print(f"Multicall failed (with native) : {e}")
-            # fallback
             token_vals = await asyncio.gather(
                 *(self._safe_get_erc20_balance(addr, token_decimals_map.get(addr, 18))
                   for addr in token_addresses)
@@ -420,11 +305,9 @@ class Arbitrage:
         balances = {}
         native_balance = None
 
-        # парсим токены
         for idx, addr in enumerate(token_addresses):
             raw_bytes = return_data_list[idx]
             try:
-                # преобразование
                 if isinstance(raw_bytes, str) and raw_bytes.startswith("0x"):
                     data_bytes = bytes.fromhex(raw_bytes[2:])
                 else:
@@ -436,53 +319,15 @@ class Arbitrage:
                 print(f"Failed parse token {addr}: {e}")
                 balances[addr] = 0.0
 
-        # парсим нативку (последний)
-        # raw_native_bytes = return_data_list[len(token_addresses)]
-        # try:
-        #     if isinstance(raw_native_bytes, str) and raw_native_bytes.startswith("0x"):
-        #         data_bytes = bytes.fromhex(raw_native_bytes[2:])
-        #     else:
-        #         data_bytes = raw_native_bytes
-        #     print(f'Nat: {data_bytes}\n\n{raw_native_bytes}\n{token_addresses}')
-        #     native_int = decode(['uint256'], data_bytes)[0]
-        #     print(f'Res nat: {native_int / (10 ** 18)}')
-        #     native_balance = native_int / (10 ** 18)
-        # except Exception as e:
-        #     print(f"Failed parse native balance: {e}")
-        #     native_balance = None
-        # Альтернатива: получить нативный баланс отдельным вызовом
+        
         native_balance = await self.w3.eth.get_balance(wallet_addr) / (10 ** 18)
         return balances, native_balance
 
-    # async def _safe_get_erc20_balance(self, address: str, decimals: int,
-    #                                   max_retries: int = 3, delay: float = 1.0):
-    #     """
-    #     Индивидуальный вызов баланса ERC-20. Используется как fallback.
-    #     """
-    #     addr = self.w3.to_checksum_address(address)
-    #     contract = self.w3.eth.contract(address=addr, abi=self.erc20_abi)
-    #     for attempt in range(1, max_retries + 1):
-    #         try:
-    #             raw = await asyncio.wait_for(
-    #                 contract.functions.balanceOf(self.w3.to_checksum_address(self.owner.address)).call(),
-    #                 timeout=5
-    #             )
-    #             return raw / (10 ** decimals)
-    #         except asyncio.TimeoutError:
-    #             print(f"ERC20 balance timeout attempt {attempt} for {address}")
-    #         except Exception as e:
-    #             print(f"RPC error ERC20 (attempt {attempt}) for {address}: {e}")
-    #         if attempt < max_retries:
-    #             await asyncio.sleep(delay)
-    #     return 0.0
-
 
     async def get_price_mexc(self, session):
-        # session = await get_session()
         u_id = self.db.get_uid(self.pair)
         if session is None:
             session = await get_session()
-        # u_id = self.db.get_uid()
         headers = {
             "Referer": f"https://www.mexc.com/exchange/{self.symbol}",
             "Cookie": f"uc_token={u_id}; u_id={u_id};",
@@ -491,7 +336,6 @@ class Arbitrage:
         ask = []
         bids = []
         try:
-            # params = {"symbol": str(self.symbol), "type": "step0"}
             params = {"symbol": str(self.symbol)}
             if session is not None:
                 async with session.get(f"https://www.mexc.com/api/platform/spot/market/depth", headers=headers, params=params, timeout=5) as resp:
@@ -510,9 +354,6 @@ class Arbitrage:
                             break
             else:
                 return None, None, None, None, None, None
-        # except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        #     print(f"Error fetching vcoinId get_price: {e}")
-        #     return None, None, None, None, None, None
         except Exception as e:
             if str(e) == 'Session is closed':
                 return None, None, None, None, None, None
@@ -550,11 +391,9 @@ class Arbitrage:
         try:
             while self.running == True:
                 t = time.time()
-                # Получаем данные стакана с MEXC
                 ask_amounts, ask_costs, ask_avg, bid_amounts, bid_costs, bid_avg = await self.get_price_mexc(session)
                 if ask_amounts is None:
                     continue
-                # Используем максимальную цену OKX как эталон для продажи
                 okx_sell_price = self.pancakce.sell
                 if okx_sell_price == 0:
                     print(f'Twen')
@@ -565,15 +404,12 @@ class Arbitrage:
                     volume = ask_amounts[i] if ((ask_amounts[i] * ask_avg[i][0]) <= self.balance_usdt_mexc) else (self.balance_usdt_mexc/ask_avg[i][0])
                     mexc_price = ask_avg[i][0]
                     price = ask_avg[i][1]
-                    # Рассчитываем комиссии и проскальзывание для OKX
-                    # okx_effective_price = float(okx_sell_price) * 0.99
                     okx_effective_price = float(okx_sell_price)
 
-                    # Рассчитываем прибыль
                     profit = (okx_effective_price - mexc_price) * volume
                     if (float(volume) * float(mexc_price) <= self.max_volume) and float(volume) <= float(self.balance_token_dex):
                         spread = ((okx_effective_price - mexc_price) / mexc_price) * 100
-                        if float(spread) >= float(curr_spread):                  #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                        if float(spread) >= float(curr_spread):                 
                             candidates.append({
                                 'type': 'BUY_MEXC',
                                 'volume': volume,
@@ -591,20 +427,16 @@ class Arbitrage:
                     print(f'Nomber 2')
                     continue
 
-                # Анализируем BIDS (покупка на OKX -> продажа на MEXC)
                 for i in range(len(bid_amounts)):
                     volume = bid_amounts[i] if ((bid_amounts[i] * okx_buy_price) <= self.balance_usdc_dex_bsc) else (self.balance_usdc_dex_bsc / okx_buy_price)
-                    mexc_price = bid_avg[i][0]  # Средняя цена продажи на MEXC
+                    mexc_price = bid_avg[i][0] 
                     price = bid_avg[i][1]
-                    # Используем минимальную цену OKX для покупки
                     okx_effective_price = float(okx_buy_price)
 
-                    # Рассчитываем прибыль
                     profit = (mexc_price - okx_effective_price) * volume
                     if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
-                    # if (float(okx_buy_price) * float(volume) <= 200):
                         spread = ((mexc_price - okx_effective_price) / okx_effective_price) * 100
-                        if float(spread) >= float(curr_spread):       #СПРЕД !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                        if float(spread) >= float(curr_spread):    
                             candidates.append({
                                 'type': 'SELL_MEXC',
                                 'volume': volume,
@@ -619,22 +451,15 @@ class Arbitrage:
 
                 if candidates:
                     best = max(candidates, key=lambda x: x['profit'])
-                    # fee = calculate_total_gas_cost(id3[best['chain_id']], cureent, best['volume'])
-                    # best['profit'] = best['profit'] - fee
-                    # print(f'1: {best}')
                     fee = await self._calc_buy_mecx_fee(best['volume'], best['mexc_price'])
                     if best['type'] == 'BUY_MEXC':
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
-                            # print(f'BUY {best} | {fee}')
-                            # await self.send_opportunity_alert(best)
                             print(f'10: {best}')
                             await self.make_trade(best, session)
                     else:
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
-                            # print(f'SEll | {best} | {fee}')
-                            # await self.send_opportunity_alert(best)
                             print(f'10: {best}')
                             await self.make_trade(best, session)
                 else:
@@ -644,8 +469,6 @@ class Arbitrage:
             await self.send_notification(f'Произошла ошибка: {e}. Перезапуск через 30 сек')
             await asyncio.sleep(5)
             self.running = True
-        # finally:
-        # await session.close()
 
     async def handle_swap(self, val, status, best, symbol, u_id, session):
         if best['type'] == 'SELL_MEXC':
@@ -667,7 +490,6 @@ class Arbitrage:
             ]:
                 print(f"❌ DEX swap FATAL: {val.error_type.value} - {val.error_msg}")
 
-                # Автоматическая обратная покупка на MEXC (фиксируем убыток)
                 await self.send_notification(
                     f"❌ PAIR: {self.pair}"
                     f"⚠️ DEX swap не удался ({val.error_type.value})\n"
@@ -687,7 +509,6 @@ class Arbitrage:
                     )
                     await self.update_balances()
             else:
-                # Неизвестная ошибка
                 await self.send_notification(
                     f"⚠️ DEX swap unknow error: {val.error_msg}\n"
                     f"Проверьте баланс вручную"
@@ -715,7 +536,6 @@ class Arbitrage:
             ]:
                 print(f"❌ DEX swap FATAL: {val.error_type.value} - {val.error_msg}")
 
-                # Автоматическая обратная покупка на MEXC (фиксируем убыток)
                 await self.send_notification(
                     f"❌ PAIR: {self.pair}"
                     f"⚠️ DEX swap не удался ({val.error_type.value})\n"
@@ -736,7 +556,6 @@ class Arbitrage:
                     )
                     return
             else:
-                # Неизвестная ошибка
                 await self.send_notification(
                     f"⚠️ DEX swap unknow error: {val.error_msg}\n"
                     f"Проверьте баланс вручную"
@@ -807,7 +626,6 @@ class Arbitrage:
                             await self.handle_swap(val, status, best, symbol, u_id, session)
                             return
                         await asyncio.sleep(0.05)
-                    # 3) DEX swap
                     val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACTS, status['filled'])
                     await self.handle_swap(val, status, best, symbol, u_id, session)
                     return
