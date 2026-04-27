@@ -48,11 +48,10 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-
-**Обязательные параметры config:**
-Telegram Bot
+### 4. Обязательные параметры config:
+```bash
 BOT_TOKEN=your_telegram_bot_token
-
+```
 
 ### 5. Запуск
 ```bash
