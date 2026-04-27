@@ -48,26 +48,10 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-### 4. Настрой .env файл
-```bash
-cp .env.example .env
-nano .env
-```
 
-**Обязательные параметры:**
+**Обязательные параметры config:**
 Telegram Bot
 BOT_TOKEN=your_telegram_bot_token
-ADMIN_ID=your_telegram_id
-
-MEXC API
-MEXC_API_KEY=your_mexc_api_key
-MEXC_SECRET_KEY=your_mexc_secret_key
-
-BSC RPC
-BSC_RPC_URL=https://bsc-dataseed1.binance.org/
-
-База данных
-DATABASE_URL=postgresql://user:pass@localhost/arbitrage
 
 
 ### 5. Запуск
