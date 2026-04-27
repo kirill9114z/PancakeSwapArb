@@ -4,16 +4,12 @@ import hashlib
 import asyncio
 from typing import Dict, Optional, Any
 import aiohttp
-# from config import current_config
 
-# Потокобезопасный кэш с TTL (30 секунд)
 _id_cache: Dict[str, tuple[str, float]] = {}
 CACHE_TTL = 60
 
-# Асинхронная блокировка для кэша
 _cache_lock = asyncio.Lock()
 
-# Сессия с connection pool и таймаутами
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
 
@@ -23,8 +19,8 @@ async def get_session() -> aiohttp.ClientSession:
     async with _session_lock:
         if _session is None or _session.closed:
             connector = aiohttp.TCPConnector(
-                limit=100,  # Максимум соединений
-                ttl_dns_cache=3000  # Кэш DNS 5 минут
+                limit=100,  
+                ttl_dns_cache=3000  
             )
             _session = aiohttp.ClientSession(
                 connector=connector,
@@ -35,9 +31,9 @@ async def get_session() -> aiohttp.ClientSession:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
                 },
                 timeout=aiohttp.ClientTimeout(
-                    total=20,  # Общий таймаут
-                    connect=10,  # Таймаут соединения
-                    sock_read=10  # Таймаут чтения
+                    total=20,  
+                    connect=10,  
+                    sock_read=10  
                 )
             )
     return _session
@@ -51,7 +47,6 @@ async def close_session():
 
 
 async def get_current_ids(symbol: str, session, u_id):
-    # Используем кэш с проверкой TTL
     async with _cache_lock:
         if symbol in _id_cache:
             cached_value, timestamp = _id_cache[symbol]
@@ -78,7 +73,6 @@ async def get_current_ids(symbol: str, session, u_id):
                 for item in data['data']:
                     if item["currency"] == symbol.split('_')[0]:
                         vcoin_id = item["vcoinId"]
-                        # Обновляем кэш
                         async with _cache_lock:
                             _id_cache[symbol] = (vcoin_id, time.time())
                         return vcoin_id
@@ -92,12 +86,10 @@ async def get_current_ids(symbol: str, session, u_id):
 def generate_signature(u_id: str, data: dict) -> dict:
     """Синхронная генерация подписи с использованием пула процессов"""
     timestamp = str(int(time.time() * 1000))
-    # Используем более эффективное хеширование
     h = hashlib.new('md5')
     h.update((u_id + timestamp).encode())
     g = h.hexdigest()[7:]
 
-    # Оптимизированная сериализация
     s = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
 
     h = hashlib.new('md5')
@@ -115,7 +107,6 @@ async def place_limit_order(
         timeout: float = 3.0
 ):
     t = time.time()
-    # session = await get_session()
     vcoin_id = await get_current_ids(symbol, session, u_id)
     if vcoin_id == False:
         return False
@@ -126,7 +117,6 @@ async def place_limit_order(
     trade_type = 1 if is_sell else 0
     side_str = "SELL" if is_sell else "BUY"
 
-    # Формируем данные для подписи (точно как в рабочем синхронном коде)
     sign_data = {
         "symbol": symbol,
         "side": side_str,  # Важно: строка "SELL"/"BUY", а не число!
@@ -138,7 +128,6 @@ async def place_limit_order(
     }
     signature = generate_signature(u_id, sign_data)
 
-    # Формируем тело запроса (точно как в синхронной версии)
     body = {
         "currencyId": vcoin_id,
         "marketCurrencyId": "128f589271cb4951b03e71e6323eb7be",
