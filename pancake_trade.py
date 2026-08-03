@@ -14,6 +14,17 @@ from decimal import Decimal, getcontext
 import os
 import websockets
 
+from config import (
+    USDT_CONTRACT,
+    WBNB_ADDRESS,
+    PANCAKE_SMART_ROUTER,
+    DEFAULT_PANCAKE_FEE_RATE,
+    PRICE_OUTLIER_THRESHOLD,
+    STALE_PRICE_SECONDS,
+    DEX_BUY_MARKUP,
+    DEX_SELL_MARKDOWN,
+)
+
 
 _session: Optional[aiohttp.ClientSession] = None
 _session_lock = asyncio.Lock()
@@ -52,21 +63,21 @@ class OkxTrade:
         self.wss = wss
         self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(wss))
         loop = asyncio.get_event_loop()
-        self.USDT_ADDRESS = "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
+        self.USDT_ADDRESS = USDT_CONTRACT
 
 
         self.rpc = AsyncWeb3(AsyncHTTPProvider(rpc))
         self.db = db
         self.account = self.rpc.eth.account.from_key(private_key)
         self.from_addr = Web3.to_checksum_address(self.account.address)
-        self.router_addr = Web3.to_checksum_address("0x13f4EA83D0bd40E75C8222255bc855a974568Dd4")
+        self.router_addr = Web3.to_checksum_address(PANCAKE_SMART_ROUTER)
         with open('pancake_router_v2_abi.json', 'r') as f:
             self.smart_router_abi = json.load(f)
         self.router = self.rpc.eth.contract(address=self.router_addr, abi=self.smart_router_abi)
 
         with open('erc20_abi.json', 'r') as f:
             self.erc20_abi = json.load(f)
-        self.WBNB = Web3.to_checksum_address("0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")
+        self.WBNB = Web3.to_checksum_address(WBNB_ADDRESS)
 
         abi_filepath = os.path.join("pair_abi", f"{self.pair.split('/')[0]}.json")
         with open(abi_filepath, 'r', encoding='utf-8') as f:
@@ -76,6 +87,18 @@ class OkxTrade:
         self.sell = 0
 
         self.running = False
+        self.backoff = 1
+        self._swap_lock = asyncio.Lock()
+
+        # Watchdog устаревшей цены: если buy/sell давно не обновлялись — гасим котировки.
+        self.last_price_update_ts = time()
+        self._stale_notified = False
+        self.STALE_PRICE_SECONDS = STALE_PRICE_SECONDS
+
+        # Комиссия последнего реально найденного пула (доля, напр. 0.0025 = 0.25%).
+        # Используется в Arbitrage._calc_buy_mecx_fee, чтобы не оценивать прибыль по
+        # захардкоженной комиссии, которая может быть в разы ниже реальной комиссии пула.
+        self.last_fee_rate = None
 
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -139,13 +162,21 @@ class OkxTrade:
         raw_price = await self.sqrtPriceX96_to_price(sqrtPriceX96)
         price_corr = 1 / (await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out) if side1
                       else await self.adjust_for_decimals(raw_price, self.decimals_in, self.decimals_out))
-        if abs(float(price_corr) - self.rak) <= self.rak * 0.5:
+        price_corr = float(price_corr)
+
+        # Как раньше: обновляем цену только если отклонение от rak <= порога
+        # (по умолчанию 50%). Резкий одиночный скачок отбрасываем сразу,
+        # без ожидания N подтверждений — в тонком пуле сделки огромкие и
+        # ждать 2–3 «похожих» свопа подряд значит терять время.
+        if abs(price_corr - self.rak) <= self.rak * PRICE_OUTLIER_THRESHOLD:
+            self.last_price_update_ts = time()
+            self._stale_notified = False
             if amount0 < 0:
-                self.rak = float(price_corr)
-                self.buy = float(price_corr) * 1.005
+                self.rak = price_corr
+                self.buy = price_corr * DEX_BUY_MARKUP
             if amount1 < 0:
-                self.rak = float(price_corr)
-                self.sell = float(price_corr) * 0.995
+                self.rak = price_corr
+                self.sell = price_corr * DEX_SELL_MARKDOWN
 
     async def get_rak(self, side, contract):
 
@@ -174,13 +205,13 @@ class OkxTrade:
             return 1.0
 
     async def monitoring_price(self):
-        global backoff
-        backoff = 1
+        self.backoff = 1
         print("Start 2")
 
         pool = self.rpc.eth.contract(address=self.address, abi=self.abi)
         side = await self.side(pool)
         self.rak = await self.get_rak(side, pool)
+        self.last_price_update_ts = time()
         print(f"rak: {self.rak} {self.pair}")
         if side is None:
             print("side1 is None, невозможна работа")
@@ -196,7 +227,7 @@ class OkxTrade:
                         await self.w3.provider.disconnect()
                         await self.w3.provider.connect()
                         swap_filter = await pool.events.Swap.create_filter(from_block="latest")
-                        backoff = 1
+                        self.backoff = 1
 
                     events = await swap_filter.get_new_entries()
                     for e in events:
@@ -204,17 +235,31 @@ class OkxTrade:
                             break
                         await self.handle_event(e, side) 
 
+                    # Watchdog устаревшей цены: если в пуле долго не было свопов,
+                    # self.buy/self.sell могут отражать давно неактуальную цену.
+                    # Раньше бот продолжал бы торговать против неё бесконечно -
+                    # теперь просто "отключаем" котировки (buy=sell=0), и
+                    # analyze_opportunities в trade.py уже умеет пропускать
+                    # итерации при нулевой цене (см. проверки okx_sell_price/okx_buy_price == 0).
+                    if (self.buy != 0 or self.sell != 0) and (time() - self.last_price_update_ts) > self.STALE_PRICE_SECONDS:
+                        if not self._stale_notified:
+                            print(f"[{self.pair}] Цена не обновлялась {time() - self.last_price_update_ts:.0f}s - "
+                                  f"приостанавливаем торговлю по паре до следующего свопа в пуле")
+                            self._stale_notified = True
+                        self.buy = 0
+                        self.sell = 0
+
                     await asyncio.sleep(0.05) 
 
                 except (websockets.ConnectionClosedError, OSError) as e:
-                    print(f"WS disconnected: {e}. Reconnecting in {backoff}s")
+                    print(f"WS disconnected: {e}. Reconnecting in {self.backoff}s")
                     try:
                         await self.w3.provider.disconnect()
                     except Exception:
                         pass
 
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 30)
+                    await asyncio.sleep(self.backoff)
+                    self.backoff = min(self.backoff * 2, 30)
 
                     await self.w3.provider.connect()
                     swap_filter = await pool.events.Swap.create_filter(from_block="latest")
@@ -229,6 +274,30 @@ class OkxTrade:
                 print(f"Не получилось закрыть соединения вебсоккета, ошибка: {e}")
             print(f"Monitoring price stopped for {self.address}")
 
+    async def _get_tx_status(self, tx_hash) -> Optional[bool]:
+        """Проверяет, была ли транзакция уже замайнена.
+        True = успех, False = revert, None = ещё не найдена в сети."""
+        try:
+            receipt = await self.rpc.eth.get_transaction_receipt(tx_hash)
+            if receipt is None:
+                return None
+            return receipt.status == 1
+        except Exception:
+            return None
+
+    async def _await_previous_tx(self, tx_hash_hex: str) -> Optional[bool]:
+        """Даёт ранее отправленной транзакции шанс подтвердиться, прежде чем
+        решать, нужно ли отправлять новую. Без этого разрыв соединения именно
+        в момент wait_for_transaction_receipt приводил к повторной отправке
+        того же свопа (два реальных свопа на один вызов) — это и вызывало
+        дублирующиеся транзакции в кошельке."""
+        for _ in range(3):
+            status = await self._get_tx_status(tx_hash_hex)
+            if status is not None:
+                return status
+            await asyncio.sleep(4)
+        return None
+
     async def swap_universal_async(
             self,
             token_in: str,
@@ -239,8 +308,25 @@ class OkxTrade:
             min_profit_percent: float = 0.0,
             max_retries: int = 3
     ):
+      async with self._swap_lock:
+        last_tx_hash: Optional[str] = None
         for attempt in range(max_retries):
             try:
+                if last_tx_hash is not None:
+                    status = await self._await_previous_tx(last_tx_hash)
+                    if status is True:
+                        print(f"Своп уже был выполнен ранее (tx={last_tx_hash}), повторная отправка НЕ требуется")
+                        return SwapResult(success=True, tx_hash=last_tx_hash)
+                    if status is None:
+                        print(f"Не удалось подтвердить статус предыдущей tx {last_tx_hash} — прекращаем попытки, чтобы не отправить дубликат свопа")
+                        return SwapResult(
+                            success=False,
+                            error_type=SwapErrorType.FATAL_TOKEN_ISSUE,
+                            error_msg=f"Unknown status of previously sent tx {last_tx_hash}; aborting to avoid a duplicate on-chain swap"
+                        )
+                    # status is False (revert) - предыдущая tx не прошла, безопасно готовим новую попытку
+                    last_tx_hash = None
+
                 token_in_addr = Web3.to_checksum_address(token_in)
                 token_out_addr = Web3.to_checksum_address(token_out)
 
@@ -339,10 +425,12 @@ class OkxTrade:
                     chosen_type = 'v3'
                     chosen_amount_out_est = amount_out_est_v3
                     debug.append(f"Chosen V3 (fee {v3_fee_used}) amount_out_est {chosen_amount_out_est/(10**self.decimals_out)}")
+                    self.last_fee_rate = v3_fee_used / 1_000_000 if v3_fee_used is not None else None
                 else:
                     chosen_type = 'v2'
                     chosen_amount_out_est = amount_out_est_v2
                     debug.append(f"Chosen V2 path {v2_path_used} amount_out_est {chosen_amount_out_est/(10**self.decimals_out)}")
+                    self.last_fee_rate = DEFAULT_PANCAKE_FEE_RATE  # V2: обычно 0.25%
 
                 amount_out_min = int(chosen_amount_out_est * (1 - slippage))
 
@@ -477,9 +565,11 @@ class OkxTrade:
 
                 signed_txn = await asyncio.to_thread(Account.sign_transaction, txn, self.private_key)
                 tx_hash = await self.rpc.eth.send_raw_transaction(signed_txn.raw_transaction)
+                last_tx_hash = tx_hash.hex()
                 receipt = await self.rpc.eth.wait_for_transaction_receipt(tx_hash)
 
                 if receipt.status != 1:
+                    last_tx_hash = None
                     if attempt < max_retries - 1:
                         slippage = min(slippage + 0.05, 0.3)
                         await asyncio.sleep(3)
@@ -500,7 +590,13 @@ class OkxTrade:
                     max_price_impact = min(max_price_impact * 1.5, 1.0)
                     await asyncio.sleep(2 ** attempt)
                 else:
+                    if last_tx_hash is not None:
+                        return SwapResult(
+                            success=False,
+                            error_type=SwapErrorType.FATAL_TOKEN_ISSUE,
+                            error_msg=f"Unknown final status of tx {last_tx_hash}: {e}"
+                        )
                     return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY, error_msg=str(e))
 
-            return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
-                              error_msg="Max retries exceeded")
+        return SwapResult(success=False, error_type=SwapErrorType.FATAL_NO_LIQUIDITY,
+                          error_msg="Max retries exceeded")

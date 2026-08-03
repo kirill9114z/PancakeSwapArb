@@ -1,0 +1,119 @@
+# =============================================================================
+# Шаблон конфигурации. Скопируйте в config.py и заполните BOT_TOKEN:
+#   Windows:  copy config.py.example config.py
+#   Linux/Mac: cp config.py.example config.py
+# config.py НЕ коммитится (.gitignore) — там секрет и ваши локальные правки.
+# =============================================================================
+
+# --- Telegram ---
+# Токен бота от @BotFather. Без него UI (bot.py) не стартует.
+BOT_TOKEN = "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE"
+
+# --- Адреса контрактов на BSC (mainnet) ---
+# USD1/USDT, с которым торгует бот на Pancake (exactInputSingle / hedge).
+# Источник: адрес стейблкоина в паре пула на BSC, не путать с Binance-Peg USDT.
+USDT_CONTRACT = "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d"
+
+# Wrapped BNB — промежуточный хоп в путях V2 (token -> WBNB -> USDT).
+# Официальный WBNB на BSC: https://bscscan.com/token/0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+WBNB_ADDRESS = "0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+
+# PancakeSwap Smart Router (V2+V3) на BSC.
+# https://docs.pancakeswap.finance/developers/smart-contracts/smart-router
+PANCAKE_SMART_ROUTER = "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4"
+
+# Multicall3 (стандартный деплой на BSC и большинстве EVM-сетей).
+# https://www.multicall3.com / https://github.com/mds1/multicall3
+MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
+# --- Торговые пороги (trade.py / Arbitrage) ---
+# Минимальная прибыль сделки в USD после вычета комиссий; ниже — сделку не берём.
+PROFIT_THRESHOLD_USD = 0.2
+
+# Запасной спред в коде (исторически; реальный порог берётся из БД:
+# pair_spread или global_spread). Оставлен для совместимости.
+DEFAULT_GLOBAL_SPREAD_PCT = -0.1
+
+# Кулдаун повторных алертов по одной возможности, секунды.
+ALERT_COOLDOWN_SECONDS = 300
+
+# Минимальное изменение прибыли ($), чтобы снова слать алерт по той же возможности.
+MIN_PROFIT_CHANGE_USD = 1.0
+
+# Сколько уровней стакана MEXC читать (asks/bids) за один запрос depth API.
+MEXC_ORDERBOOK_DEPTH_LEVELS = 7
+
+# Доля баланса, которую считаем «доступной» (1% запас на комиссии/округления/гонку).
+BALANCE_SAFETY_FACTOR = 0.99
+
+# Decimals у USDT/USD1 на BSC в нашем сетапе (у USD1 обычно 18, не 6 как у ERC20 USDT).
+USDT_DECIMALS = 18
+
+# Decimals нативного BNB / wei.
+NATIVE_DECIMALS = 18
+
+# Комиссия MEXC spot taker (доля): 0.05% = 0.0005. Используется в оценке прибыли.
+MEXC_TAKER_FEE_RATE = 0.0005
+
+# Консервативная комиссия Pancake, если last_fee_rate пула ещё неизвестен (0.25%).
+# Реальная ставка после свопа кэшируется в OkxTrade.last_fee_rate.
+DEFAULT_PANCAKE_FEE_RATE = 0.0025
+
+# Фиксированная добавка к оценке комиссий в USD (газ + запас).
+FEE_FLAT_USD = 0.01
+
+# Таймаут ожидания фила лимитного ордера на MEXC, секунды.
+# Если за это время ордер не закрыт — отменяем и либо хеджим частичный fill, либо выходим.
+MEXC_ORDER_FILL_TIMEOUT_SECONDS = 3
+
+# Пауза между опросами статуса ордера на MEXC, секунды.
+MEXC_ORDER_POLL_INTERVAL_SECONDS = 0.05
+
+# Цена «рыночного» обратного ордера при FATAL на DEX после SELL_MEXC
+# (лимит с завышенной ценой, чтобы взять ask как маркет-бай).
+MEXC_EMERGENCY_BUY_PRICE = 10000
+
+# Множитель цены при аварийной обратной продаже на MEXC (best_price * factor).
+MEXC_EMERGENCY_SELL_PRICE_FACTOR = 0.9
+
+# Пауза перед проверкой статуса аварийного ордера, секунды.
+MEXC_EMERGENCY_ORDER_CHECK_DELAY_SECONDS = 1
+
+# Пауза перед перезапуском analyze_opportunities после падения, секунды.
+ANALYZE_RESTART_DELAY_SECONDS = 30
+
+# Ретраи RPC/балансов.
+BALANCE_FETCH_MAX_RETRIES = 3
+BALANCE_FETCH_RETRY_DELAY_SECONDS = 5
+
+# HTTP timeout для запроса стакана MEXC (секунды).
+MEXC_DEPTH_HTTP_TIMEOUT_SECONDS = 5
+
+# --- main.py ---
+# Стартовая цена (rak) до первого чтения slot0/reserves. Дальше перезаписывается из пула.
+# Если у пары сильно другая цена — не критично: get_rak обновит при старте мониторинга.
+INITIAL_RAK_PRICE = 1.623
+
+# Таймаут HTTP-клиента CCXT для MEXC, мс.
+MEXC_CCXT_TIMEOUT_MS = 30000
+
+# Пауза после старта пары до первого update_balances / анализа, секунды.
+# Даёт время вебсокету пула получить первую цену.
+PAIR_STARTUP_DELAY_SECONDS = 20
+
+# --- bot.py (Telegram UI) ---
+# Допустимый диапазон спреда (%) при вводе глобального/индивидуального значения.
+SPREAD_INPUT_MIN_PCT = 0
+SPREAD_INPUT_MAX_PCT = 100
+
+# --- Защита цены DEX (pancake_trade) ---
+# Макс. допустимое отклонение новой цены от self.rak (0.5 = ±50%).
+# Если больше — событие Swap игнорируется (как в исходной логике).
+PRICE_OUTLIER_THRESHOLD = 0.5
+
+# Если buy/sell не обновлялись дольше N секунд — гасим котировки (торговля встаёт).
+STALE_PRICE_SECONDS = 120
+
+# Буфер к mid-цене пула: buy чуть выше, sell чуть ниже last trade price.
+DEX_BUY_MARKUP = 1.005   # +0.5%
+DEX_SELL_MARKDOWN = 0.995  # -0.5%

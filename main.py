@@ -6,6 +6,7 @@ import logging
 import ccxt.async_support as ccxt
 
 from pancake_trade import OkxTrade
+from config import INITIAL_RAK_PRICE, MEXC_CCXT_TIMEOUT_MS, PAIR_STARTUP_DELAY_SECONDS
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -22,25 +23,25 @@ async def monitor_pair(pair_name, db, chat_id, bot):
 
 
     pair_data = db.get_pair_data(pair_name)
-    rak = 1.623
+    rak = INITIAL_RAK_PRICE
     mexc_client = ccxt.mexc({
         'apiKey': pair_data['mexc_api_key'],
         'secret': pair_data['mexc_api_secret'],
         'enableRateLimit': True,
-        'timeout': 30000
+        'timeout': MEXC_CCXT_TIMEOUT_MS
     })
     pancake = OkxTrade(pair_name, pair_data['address_contract'], pair_data['abi'], pair_data['decimals'], rak, pair_data["private_key"], pair_data["websocket"], pair_data['rpc'] ,db)
     arbitrage = Arbitrage(mexc_client, pair_name, pancake, pair_data["private_key"], pair_data['contract_bsc'],pair_data["rpc"], bot, chat_id, db, pair_data['volume'])
     active_arbitrage_instances[pair_name] = arbitrage
     arbitrage.running = True
     pancake.running = True
-    await asyncio.sleep(20)
+    await asyncio.sleep(PAIR_STARTUP_DELAY_SECONDS)
     await arbitrage.update_balances()
     try:
         tasks = []
         logger.info(f"We start analyzing to {pair_name}")
         task1 = asyncio.create_task(pancake.monitoring_price())
-        task2 = asyncio.create_task(arbitrage.analyze_opportunities())
+        task2 = asyncio.create_task(arbitrage.run_analysis_loop())
         tasks.append(task2)
         tasks.append(task1)
         await asyncio.gather(task1, task2)

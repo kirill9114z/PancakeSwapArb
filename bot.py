@@ -1,5 +1,4 @@
 import logging
-import time
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -8,7 +7,6 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 import aiofiles
 import os
@@ -19,7 +17,7 @@ from exchange import get_session
 from main import main as arb_main
 from main import active_arbitrage_instances
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, SPREAD_INPUT_MIN_PCT, SPREAD_INPUT_MAX_PCT
 
 db = Database()
 arb_task: asyncio.Task | None = None
@@ -143,7 +141,7 @@ async def global_spread_start(message: types.Message, state: FSMContext):
     current = db.get_global_spread()
     await message.answer(
         f"Текущий глобальный спред: {current}%\n"
-        "Введите новое значение (0 < spread < 100):",
+        f"Введите новое значение ({SPREAD_INPUT_MIN_PCT} < spread < {SPREAD_INPUT_MAX_PCT}):",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(Form.GLOBAL_SPREAD_INPUT)
@@ -153,13 +151,15 @@ async def global_spread_start(message: types.Message, state: FSMContext):
 async def global_spread_set(message: types.Message, state: FSMContext):
     try:
         spread = float(message.text)
-        if 0 < spread < 100:
+        if SPREAD_INPUT_MIN_PCT < spread < SPREAD_INPUT_MAX_PCT:
             db.set_global_spread(spread)
             await message.answer(f"✅ Глобальный спред установлен: {spread}%")
             return await cmd_start(message, state)
         raise ValueError()
     except:
-        await message.answer("❌ Ошибка! Введите число между 0 и 100:")
+        await message.answer(
+            f"❌ Ошибка! Введите число между {SPREAD_INPUT_MIN_PCT} и {SPREAD_INPUT_MAX_PCT}:"
+        )
 
 
 @dp.message(Form.SETTINGS, F.text == "🎯 Индивидуальный спред")
@@ -198,7 +198,7 @@ async def individual_spread_select(message: types.Message, state: FSMContext):
     current = db.get_pair_spread(pair) or "не установлен"
     await message.answer(
         f"Текущий спред для {pair}: {current}%\n"
-        "Введите новое значение (0 < spread < 100):",
+        f"Введите новое значение ({SPREAD_INPUT_MIN_PCT} < spread < {SPREAD_INPUT_MAX_PCT}):",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(Form.INDIVIDUAL_SPREAD_INPUT)
@@ -208,7 +208,7 @@ async def individual_spread_select(message: types.Message, state: FSMContext):
 async def individual_spread_set(message: types.Message, state: FSMContext):
     try:
         spread = float(message.text)
-        if not (0 < spread < 100):
+        if not (SPREAD_INPUT_MIN_PCT < spread < SPREAD_INPUT_MAX_PCT):
             raise ValueError()
 
         data = await state.get_data()
@@ -217,7 +217,9 @@ async def individual_spread_set(message: types.Message, state: FSMContext):
         await message.answer(f"✅ Спред для {pair} установлен: {spread}%")
         return await cmd_start(message, state)
     except:
-        await message.answer("❌ Ошибка! Введите число между 0 и 100:")
+        await message.answer(
+            f"❌ Ошибка! Введите число между {SPREAD_INPUT_MIN_PCT} и {SPREAD_INPUT_MAX_PCT}:"
+        )
 
 @dp.message(Form.SETTINGS, F.text == "🆔 Обновить U_ID")
 async def update_uid(message: types.Message, state: FSMContext):
@@ -530,43 +532,13 @@ async def back_from_settings(message: types.Message, state: FSMContext):
 # ЗАПУСК БОТА
 # =====================
 
-@dp.callback_query(F.data.startswith("execute_"))
-async def execute_arbitrage(callback: CallbackQuery, state: FSMContext):
-    try:
-        await callback.answer("Запрос принят, проверяем...")
-        logging.info(f'Начали анализ')
-        data = callback.data.split('_')
-        print(f'Data tg: {data}, {len(data)}')
-        _, opp_type, mexc, pair, chain_id, value, mexc_price, decimal = data
-        chain_id = int(chain_id)
-        id3 = {1: 'ethereum', 8453: 'base', 56: 'bsc'}
-        contract = db.get_pair_contracts(pair)[id3[chain_id]]
-        await callback.answer("Проверяем актуальность сделки...")
-
-        arbitrage = active_arbitrage_instances.get(pair)
-        if not arbitrage:
-            await callback.message.answer(f"❌ Мониторинг для пары {pair} не активен")
-            return
-
-        opportunity = {
-            'type': f'{opp_type}_{mexc}',
-            'volume': f"{value}",
-            'chain_id': chain_id,
-            'contract': contract,
-            'mexc_price': float(mexc_price),
-            'decimals': decimal
-        }
-        t = time.time()
-        print(f'Обработка check now profit')
-        is_profitable, profit, message = await arbitrage.check_now_profit(opportunity)
-        print(f'Закончили: {time.time() - t}')
-        if is_profitable:
-            return
-        else:
-            await callback.message.answer(f"❌ Сделка больше не актуальна: {message}")
-            return
-    except Exception as e:
-        await callback.message.answer(f'❌ Ошибка в сделке: {e}')
+# Примечание: раньше здесь был обработчик колбэка "execute_..." для ручного
+# подтверждения сделки inline-кнопкой. Он был нерабочим (вызывал несуществующий
+# arbitrage.check_now_profit и db.get_pair_contracts со столбцами, которых нет в
+# текущей схеме БД - см. Database._init_db) и никогда не мог сработать, так как
+# ни один код в этом проекте больше не отправляет кнопки с callback_data
+# "execute_...". Сделки сейчас выполняются полностью автоматически внутри
+# Arbitrage.make_trade. Убрано как мёртвый/нерабочий код.
 async def main1():
     await dp.start_polling(bot)
 
