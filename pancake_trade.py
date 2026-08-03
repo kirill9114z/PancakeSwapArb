@@ -61,7 +61,7 @@ class OkxTrade:
         self.private_key = private_key
         self.rak = rak
         self.wss = wss
-        self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(wss))
+        self.w3 = AsyncWeb3(AsyncWeb3.WebsocketProvider(wss))
         loop = asyncio.get_event_loop()
         self.USDT_ADDRESS = USDT_CONTRACT
 

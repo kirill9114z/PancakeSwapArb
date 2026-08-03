@@ -35,6 +35,7 @@ from config import (
     BALANCE_FETCH_MAX_RETRIES,
     BALANCE_FETCH_RETRY_DELAY_SECONDS,
     MEXC_DEPTH_HTTP_TIMEOUT_SECONDS,
+    test_mode
 )
 
 
@@ -355,10 +356,10 @@ class Arbitrage:
         # Теперь берём комиссию РЕАЛЬНО найденного пула (кэшируется в OkxTrade
         # после последнего свопа), а если она ещё не известна - используем
         # консервативную оценку 0.25% вместо заниженной 0.025%.
-        pancake_fee_rate = getattr(self.pancakce, 'last_fee_rate', None) or DEFAULT_PANCAKE_FEE_RATE
-        fee_mexc = float(volume) * float(price) * MEXC_TAKER_FEE_RATE
+        pancake_fee_rate = getattr(self.pancakce, 'last_fee_rate', None) or 0.0025
+        fee_mexc = float(volume) * float(price) * 0.0005
         fee_panckake = float(volume) * float(price) * pancake_fee_rate
-        fee = fee_mexc + fee_panckake + FEE_FLAT_USD
+        fee = fee_mexc + fee_panckake + 0.01
         return fee
 
     async def analyze_opportunities(self):
@@ -449,8 +450,11 @@ class Arbitrage:
                                 'level': i+1,
                                 'time': time.time() - t
                             })
+                if test_mode:
+                    print(f'CANDIDATES: {candidates}')
+                    continue
 
-                if candidates:
+                if candidates and not test_mode:
                     best = max(candidates, key=lambda x: x['profit'])
                     fee = await self._calc_buy_mecx_fee(best['volume'], best['mexc_price'])
                     if best['type'] == 'BUY_MEXC':
