@@ -5,8 +5,6 @@ from enum import Enum
 
 import aiohttp
 from web3 import AsyncWeb3, AsyncHTTPProvider, Web3
-from web3.eth import AsyncEth
-from python_socks import ProxyType
 from eth_account import Account
 
 import asyncio
@@ -61,7 +59,7 @@ class OkxTrade:
         self.private_key = private_key
         self.rak = rak
         self.wss = wss
-        self.w3 = AsyncWeb3(AsyncWeb3.WebsocketProvider(wss))
+        self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(wss))
         loop = asyncio.get_event_loop()
         self.USDT_ADDRESS = USDT_CONTRACT
 

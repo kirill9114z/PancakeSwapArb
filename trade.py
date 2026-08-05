@@ -452,16 +452,16 @@ class Arbitrage:
                             })
                 if test_mode:
                     print(f'CANDIDATES: {candidates}')
-                    continue
 
                 if candidates and not test_mode:
                     best = max(candidates, key=lambda x: x['profit'])
                     fee = await self._calc_buy_mecx_fee(best['volume'], best['mexc_price'])
-                    if best['type'] == 'BUY_MEXC':
+                    print(f'BEST: {best}')
+                    if best['type'] == 'BUY_MEXC' and not test_mode:
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
                             print(f'10: {best}')
-                            await self.make_trade(best, session)
+                            # await self.make_trade(best, session)
                     else:
                         best['profit'] -= float(fee)
                         if best['profit'] >= self.PROFIT_THRESHOLD:
