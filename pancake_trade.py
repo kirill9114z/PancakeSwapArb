@@ -209,6 +209,12 @@ class OkxTrade:
         pool = self.rpc.eth.contract(address=self.address, abi=self.abi)
         side = await self.side(pool)
         self.rak = await self.get_rak(side, pool)
+        # Сразу выставляем buy/sell из свежепрочитанной цены пула, чтобы не
+        # ждать первого живого свопа - иначе buy/sell остаются 0 с момента
+        # __init__, и trade.py тут же шлёт "цена DEX недоступна/устарела",
+        # хотя актуальная цена только что была получена напрямую из пула.
+        self.buy = self.rak * DEX_BUY_MARKUP
+        self.sell = self.rak * DEX_SELL_MARKDOWN
         self.last_price_update_ts = time()
         print(f"rak: {self.rak} {self.pair}")
         if side is None:

@@ -61,6 +61,11 @@ async def monitor_pair(pair_name, db, chat_id, bot):
         if pair_name in active_arbitrage_instances:
             del active_arbitrage_instances[pair_name]
 
+        try:
+            await mexc_client.close()
+        except Exception as e:
+            logger.warning(f"Failed to close mexc client for {pair_name}: {e}")
+
 
 
 
