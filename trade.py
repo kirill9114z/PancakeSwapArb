@@ -35,6 +35,8 @@ from config import (
     BALANCE_FETCH_MAX_RETRIES,
     BALANCE_FETCH_RETRY_DELAY_SECONDS,
     MEXC_DEPTH_HTTP_TIMEOUT_SECONDS,
+    DEX_LOCAL_PROJECTION_ENABLED,
+    TRADE_EMPTY_FILL_COOLDOWN_SECONDS,
     test_mode
 )
 
@@ -75,6 +77,21 @@ class Arbitrage:
         self.alert_cooldown = ALERT_COOLDOWN_SECONDS
         self.min_profit_change = MIN_PROFIT_CHANGE_USD
         self._dex_price_stale_notified = False
+
+        # === Защита от "погони" за собственным ордером (см. историю бага: одна и та
+        # же возможность несколько раз подряд открывалась почти идентичным ордером,
+        # пока предыдущий ещё не разрешился) ===
+        # Лок сериализует make_trade по этой паре. Сейчас analyze_opportunities и так
+        # вызывает make_trade через await в одном и том же цикле - параллельного вызова
+        # быть не может, - но это дешёвая структурная страховка на случай будущего
+        # рефакторинга (например, если хедж когда-нибудь вынесут в отдельный task ради
+        # скорости) и явная документация инварианта "одна сделка по паре одновременно".
+        self._trade_lock = asyncio.Lock()
+        # last_alert переиспользуется как {trade_type: ts последней попытки с filled=0}.
+        # ВАЖНО: alert_cooldown (300с, см. config) для этого не годится - это анти-спам
+        # алертов, а не пауза перед следующей реальной попыткой сделки. Используем
+        # отдельную короткую константу.
+        self.empty_fill_cooldown = TRADE_EMPTY_FILL_COOLDOWN_SECONDS
 
         with open('pancake_router_v2_abi.json', 'r') as f:
             self.smart_router_abi = json.load(f)
@@ -396,12 +413,22 @@ class Arbitrage:
                     volume = ask_amounts[i] if ((ask_amounts[i] * ask_avg[i][0]) <= self.balance_usdt_mexc) else (self.balance_usdt_mexc/ask_avg[i][0])
                     mexc_price = ask_avg[i][0]
                     price = ask_avg[i][1]
-                    okx_effective_price = float(okx_sell_price)
+
+                    # BUY_MEXC: покупаем token на MEXC, хеджируем ПРОДАЖЕЙ volume токенов
+                    # на DEX -> нужна цена продажи именно под этот объём, а не плоский
+                    # self.pancakce.sell один и тот же для любого уровня стакана.
+                    dex_quote = self.pancakce.quote_local(volume, is_buy=False)
+                    if dex_quote is None:
+                        okx_effective_price = float(okx_sell_price)
+                        dex_needs_confirm = False
+                    else:
+                        okx_effective_price = dex_quote['effective_price']
+                        dex_needs_confirm = dex_quote['needs_confirmation']
 
                     profit = (okx_effective_price - mexc_price) * volume
                     if (float(volume) * float(mexc_price) <= self.max_volume) and float(volume) <= float(self.balance_token_dex):
                         spread = ((okx_effective_price - mexc_price) / mexc_price) * 100
-                        if float(spread) >= float(curr_spread):                 
+                        if float(spread) >= float(curr_spread if not test_mode else -10):
                             candidates.append({
                                 'type': 'BUY_MEXC',
                                 'volume': volume,
@@ -411,7 +438,8 @@ class Arbitrage:
                                 'profit': profit,
                                 'spread': spread,
                                 'level': i + 1,
-                                'time': time.time() - t
+                                'time': time.time() - t,
+                                'dex_needs_confirm': dex_needs_confirm,
                             })
 
                 okx_buy_price = self.pancakce.buy
@@ -431,14 +459,27 @@ class Arbitrage:
 
                 for i in range(len(bid_amounts)):
                     volume = bid_amounts[i] if ((bid_amounts[i] * okx_buy_price) <= self.balance_usdc_dex_bsc) else (self.balance_usdc_dex_bsc / okx_buy_price)
-                    mexc_price = bid_avg[i][0] 
+                    mexc_price = bid_avg[i][0]
                     price = bid_avg[i][1]
-                    okx_effective_price = float(okx_buy_price)
+
+                    # SELL_MEXC: продаём token на MEXC, хеджируем ПОКУПКОЙ volume токенов
+                    # на DEX. Реальное исполнение (_hedge_buy_usdt_amount) тратит
+                    # volume * self.pancakce.buy USDT и берёт что получится (exact-in) -
+                    # проецируем именно эту сумму, чтобы совпадать с тем, что реально
+                    # отправится в своп.
+                    usdt_seed = volume * okx_buy_price
+                    dex_quote = self.pancakce.quote_local(usdt_seed, is_buy=True)
+                    if dex_quote is None:
+                        okx_effective_price = float(okx_buy_price)
+                        dex_needs_confirm = False
+                    else:
+                        okx_effective_price = dex_quote['effective_price']
+                        dex_needs_confirm = dex_quote['needs_confirmation']
 
                     profit = (mexc_price - okx_effective_price) * volume
                     if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
                         spread = ((mexc_price - okx_effective_price) / okx_effective_price) * 100
-                        if float(spread) >= float(curr_spread):    
+                        if float(spread) >= float(curr_spread if not test_mode else -10):
                             candidates.append({
                                 'type': 'SELL_MEXC',
                                 'volume': volume,
@@ -448,25 +489,54 @@ class Arbitrage:
                                 'profit': profit,
                                 'spread': spread,
                                 'level': i+1,
-                                'time': time.time() - t
+                                'time': time.time() - t,
+                                'dex_needs_confirm': dex_needs_confirm,
                             })
-                if test_mode:
-                    print(f'CANDIDATES: {candidates}')
 
-                if candidates and not test_mode:
+                if candidates:
                     best = max(candidates, key=lambda x: x['profit'])
+
+                    # Защита от "погони" за собственным ордером: если по этой стороне
+                    # только что была попытка, которая вообще не наполнилась на MEXC
+                    # (см. _mark_empty_fill в make_trade), даём книге/балансу немного
+                    # времени отразить это, вместо того чтобы тут же открывать почти
+                    # идентичный ордер на той же, ещё не изменившейся цене.
+                    if self._is_in_empty_fill_cooldown(best['type']):
+                        continue
+
+                    # Локальная V3-модель (в пределах текущего тика) может занижать
+                    # реальный price impact для крупных сделок - если quote_local()
+                    # отметил needs_confirmation, делаем ОДИН ограниченный по времени
+                    # on-chain запрос ТОЛЬКО под победившего кандидата (не под все уровни
+                    # стакана) и ПЕРЕД отправкой ордера на MEXC. При таймауте/ошибке не
+                    # берём сделку вслепую - пропускаем итерацию и идём дальше, чтобы не
+                    # потерять момент на MEXC, ожидая RPC, с ценой, в которой не уверены.
+                    if DEX_LOCAL_PROJECTION_ENABLED and best.get('dex_needs_confirm'):
+                        is_buy_confirm = best['type'] == 'SELL_MEXC'
+                        confirm_amount = (best['volume'] * okx_buy_price) if is_buy_confirm else best['volume']
+                        confirmed_price = await self.pancakce.confirm_price_onchain(confirm_amount, is_buy_confirm)
+                        if confirmed_price is None:
+                            print(f"[{self.pair}] on-chain confirm не ответил вовремя - "
+                                  f"пропускаем итерацию, не берём сделку по неподтверждённой цене")
+                            continue
+                        best['dex'] = confirmed_price
+                        if best['type'] == 'BUY_MEXC':
+                            best['profit'] = (confirmed_price - best['mexc_price']) * best['volume']
+                        else:
+                            best['profit'] = (best['mexc_price'] - confirmed_price) * best['volume']
+
                     fee = await self._calc_buy_mecx_fee(best['volume'], best['mexc_price'])
                     print(f'BEST: {best}')
-                    if best['type'] == 'BUY_MEXC' and not test_mode:
+                    if best['type'] == 'BUY_MEXC':
                         best['profit'] -= float(fee)
-                        if best['profit'] >= self.PROFIT_THRESHOLD:
+                        if best['profit'] >= self.PROFIT_THRESHOLD and not test_mode:
                             print(f'10: {best}')
                             # await self.make_trade(best, session)
                     else:
                         best['profit'] -= float(fee)
-                        if best['profit'] >= self.PROFIT_THRESHOLD:
+                        if best['profit'] >= self.PROFIT_THRESHOLD and not test_mode:
                             print(f'10: {best}')
-                            await self.make_trade(best, session)
+                            # await self.make_trade(best, session)
                 else:
                     continue
         except asyncio.CancelledError:
@@ -617,7 +687,63 @@ class Arbitrage:
         price_to_use = current_price if current_price and current_price > 0 else best['dex']
         return price_to_use * filled
 
+    def _is_in_empty_fill_cooldown(self, trade_type: str) -> bool:
+        """True, если по этой стороне (BUY_MEXC/SELL_MEXC) недавно уже была попытка,
+        которая вообще не наполнилась на MEXC (filled=0, ордер снят по таймауту).
+        Не даёт analyze_opportunities немедленно открыть почти идентичный ордер на
+        той же (ещё не изменившейся) книге, пока MEXC/DEX не успели отразить
+        предыдущую отмену - см. _mark_empty_fill и историю бага в шапке класса."""
+        last_ts = self.last_alert.get(trade_type)
+        return last_ts is not None and (time.time() - last_ts) < self.empty_fill_cooldown
+
+    def _mark_empty_fill(self, trade_type: str):
+        self.last_alert[trade_type] = time.time()
+
+    def _reserve_balances_for_trade(self, best):
+        """Оптимистично резервирует баланс под ЗАПРОШЕННЫЙ объём сделки СРАЗУ при
+        входе в make_trade - до того как ордер на MEXC вообще отправлен.
+        Без этого self.balance_* остаются неизменными на всё время жизни сделки
+        (MEXC-ордер + DEX-хедж, реально может занимать секунды), и если анализ
+        успеет пересчитаться до того как make_trade вернётся (см. _trade_lock),
+        он увидит ту же "свободную" ёмкость и насчитает ещё одну сделку поверх ещё
+        не разрешившейся. Это грубая прикидка ДО реального исполнения - точная
+        синхронизация с реальностью происходит в make_trade() через
+        update_balances() в finally, независимо от исхода."""
+        try:
+            volume = float(best['volume'])
+            if best['type'] == 'BUY_MEXC':
+                # Покупаем volume токенов на MEXC за mexc_price -> тратим USDT на MEXC;
+                # хедж продаёт volume токенов из DEX-кошелька.
+                self.balance_usdt_mexc = max(0.0, self.balance_usdt_mexc - volume * float(best['mexc_price']))
+                self.balance_token_dex = max(0.0, self.balance_token_dex - volume)
+            else:
+                # Продаём volume токенов на MEXC; хедж покупает их обратно на DEX,
+                # тратя ~volume*best['dex'] USDT из DEX-кошелька.
+                self.balance_token_mexc = max(0.0, self.balance_token_mexc - volume)
+                self.balance_usdc_dex_bsc = max(0.0, self.balance_usdc_dex_bsc - volume * float(best['dex']))
+        except (KeyError, TypeError, ValueError) as e:
+            print(f"[{self.pair}] _reserve_balances_for_trade: не удалось зарезервировать баланс: {e}")
+
     async def make_trade(self, best, session):
+        """Тонкая обёртка над _make_trade_impl: сериализует сделки по паре
+        (_trade_lock), резервирует баланс ДО начала (см. _reserve_balances_for_trade)
+        и ГАРАНТИРОВАННО синхронизирует баланс с реальностью ПОСЛЕ - независимо от
+        исхода (успех/частичный филл/полный отказ), а не только на success-ветках
+        handle_swap как было раньше. Именно отсутствие безусловной синхронизации
+        после "тихих" исходов (например, ордер вообще не наполнился и просто
+        отменился) и было причиной того, что следующая итерация analyze_opportunities
+        находила "ту же" возможность и открывала повторный почти идентичный ордер."""
+        if self._trade_lock.locked():
+            print(f"[{self.pair}] make_trade: предыдущая сделка ещё не завершена, пропускаем повторный вызов")
+            return
+        async with self._trade_lock:
+            self._reserve_balances_for_trade(best)
+            try:
+                await self._make_trade_impl(best, session)
+            finally:
+                await self.update_balances()
+
+    async def _make_trade_impl(self, best, session):
         curr_pair = self.pair.split('/')
         symbol = f"{curr_pair[0]}_{curr_pair[1]}"
         u_id = self.db.get_uid(self.pair)
@@ -635,18 +761,30 @@ class Arbitrage:
                         status = await self.exchange.fetch_order(order_id, self.pair)
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] == 0:
                             await self.exchange.cancel_order(order_id, self.pair)
+                            self._mark_empty_fill(best['type'])
                             return
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
-                            val = await self.pancakce.swap_universal_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
-                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            # Перечитываем статус ПОСЛЕ отмены: filled из проверки чуть выше
+                            # мог устареть, если ордер успел дозаполниться в промежутке между
+                            # той проверкой и cancel_order - хедж должен идти по финальному,
+                            # уже замороженному отменой объёму, а не по устаревшему снимку.
+                            status = await self.exchange.fetch_order(order_id, self.pair)
+                            if status['filled'] > 0:
+                                val = await self.pancakce.swap_universal_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
+                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                            else:
+                                self._mark_empty_fill(best['type'])
                             return
                         if status['status'] == 'closed':
                             print(f"STATUS CLOSED: {status}")
                             break
                         if status['status'] == "canceled":
-                            val = await self.pancakce.swap_universal_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
-                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            if status['filled'] > 0:
+                                val = await self.pancakce.swap_universal_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
+                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                            else:
+                                self._mark_empty_fill(best['type'])
                             return
                         await asyncio.sleep(MEXC_ORDER_POLL_INTERVAL_SECONDS)
                     val = await self.pancakce.swap_universal_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
@@ -666,22 +804,32 @@ class Arbitrage:
                         status = await self.exchange.fetch_order(order_id, self.pair)
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] == 0:
                             await self.exchange.cancel_order(order_id, self.pair)
+                            self._mark_empty_fill(best['type'])
                             return
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
-                            val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACT, status['filled'])
-                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            # Перечитываем статус ПОСЛЕ отмены - см. аналогичный комментарий
+                            # в ветке SELL_MEXC выше.
+                            status = await self.exchange.fetch_order(order_id, self.pair)
+                            if status['filled'] > 0:
+                                val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACT, status['filled'])
+                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                            else:
+                                self._mark_empty_fill(best['type'])
                             return
                         if status['status'] == 'closed':
                             print(f"STATUS CLOSED: {status}")
                             break
                         if status['status'] == "canceled":
-                            val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACT, status['filled'])
-                            await self.handle_swap(val, status, best, symbol, u_id, session)
+                            if status['filled'] > 0:
+                                val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACT, status['filled'])
+                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                            else:
+                                self._mark_empty_fill(best['type'])
                             return
                         await asyncio.sleep(MEXC_ORDER_POLL_INTERVAL_SECONDS)
                     val = await self.pancakce.swap_universal_async(self.address, USDT_CONTRACT, status['filled'])
                     await self.handle_swap(val, status, best, symbol, u_id, session)
                     return
         except Exception as e:
-            print(f'Error in make_trade: {e}')
+            print(f'Error in _make_trade_impl: {e}')

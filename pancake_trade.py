@@ -21,6 +21,10 @@ from config import (
     STALE_PRICE_SECONDS,
     DEX_BUY_MARKUP,
     DEX_SELL_MARKDOWN,
+    DEX_LOCAL_PROJECTION_ENABLED,
+    DEX_V3_IMPACT_CONFIRM_THRESHOLD_PCT,
+    DEX_ONCHAIN_CONFIRM_TIMEOUT_SECONDS,
+    DEX_V3_LIQUIDITY_RESYNC_SECONDS,
 )
 
 
@@ -51,7 +55,7 @@ class SwapResult:
 
 
 class OkxTrade:
-    def __init__(self, pair, address, abi, dec2, rak, private_key, wss, rpc, db):
+    def __init__(self, pair, address, abi, dec2, rak, private_key, wss, rpc, db, token_contract=None):
         self.pair = pair
         self.address = address
         self.decimals_in = 18
@@ -62,6 +66,16 @@ class OkxTrade:
         self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(wss))
         loop = asyncio.get_event_loop()
         self.USDT_ADDRESS = USDT_CONTRACT
+        # Реальный контракт ТОРГУЕМОГО токена этой конкретной пары (contract_bsc из БД).
+        # Используется как основной способ понять, какой из token0/token1 пула -
+        # "стейбл" (см. side()/_init_local_quote_state): раньше это определялось ТОЛЬКО
+        # сверкой с глобальной константой USDT_CONTRACT, а у пула на деле может быть
+        # другой стейблкоин (напр. реальный Binance-Peg USDT вместо USD1 из конфига) -
+        # тогда сверка молча проваливалась (side() -> None -> monitoring_price() падал
+        # в return сразу после первого чтения цены, WS-подписка на Swap вообще не
+        # стартовала, self.rak/buy/sell замирали навсегда). Если token_contract не
+        # передан - логика откатывается на старое поведение (сверка с USDT_CONTRACT).
+        self.token_contract = token_contract
 
 
         self.rpc = AsyncWeb3(AsyncHTTPProvider(rpc))
@@ -97,6 +111,25 @@ class OkxTrade:
         # Используется в Arbitrage._calc_buy_mecx_fee, чтобы не оценивать прибыль по
         # захардкоженной комиссии, которая может быть в разы ниже реальной комиссии пула.
         self.last_fee_rate = None
+
+        # === Локальная (без RPC) проекция цены под объём сделки, см. quote_local() ===
+        # Тип пула, за которым мы наблюдаем через WS ('v3' или 'v2') - определяется один
+        # раз в _init_local_quote_state() по наличию slot0() в ABI, как и в get_rak().
+        self.pool_kind: Optional[str] = None
+        self.token0_addr: Optional[str] = None
+        self.token1_addr: Optional[str] = None
+        self.usdt_is_token0: Optional[bool] = None
+        # V3: комиссия пула (millionths, напр. 500 = 0.05%) и текущее состояние тика.
+        self.v3_fee_ppm: Optional[int] = None
+        self.v3_sqrt_price_x96: Optional[int] = None
+        self.v3_liquidity: Optional[int] = None
+        self.v3_tick: Optional[int] = None
+        # V2: реальные резервы пула (raw, wei), обновляются инкрементально по Swap-событиям.
+        self.v2_reserve0_raw: Optional[int] = None
+        self.v2_reserve1_raw: Optional[int] = None
+        self._local_quote_ready = False
+        self._last_liquidity_resync_ts = 0.0
+        self._logged_fallback_reasons: set = set()
 
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -135,12 +168,23 @@ class OkxTrade:
         token0 = await pool.functions.token0().call()
         token1 = await pool.functions.token1().call()
         print(f'TOKEN1 {token0} | TOKEN2 {token1}')
-        if token1 == self.USDT_ADDRESS:
+
+        # Основной способ: сверка с реальным контрактом ТОРГУЕМОГО токена этой пары
+        # (contract_bsc из БД) - надёжно независимо от того, какой именно стейблкоин
+        # использует конкретный пул. Раньше здесь была ТОЛЬКО сверка с глобальной
+        # USDT_ADDRESS - если у пула стейбл отличался от захардкоженного в конфиге
+        # (см. историю бага для LAB/USDT: пул на реальном USDT, а конфиг ждал другой
+        # адрес), эта функция возвращала None, и monitoring_price() падал в return
+        # сразу после первого чтения цены, даже не подписавшись на Swap-события.
+        token_lc = self.token_contract.lower() if self.token_contract else None
+        if token_lc and (token0.lower() == token_lc or token1.lower() == token_lc):
             return False
-        if token0 == self.USDT_ADDRESS:
+
+        # Фоллбэк на старое поведение, если token_contract не передан.
+        if token1 == self.USDT_ADDRESS or token0 == self.USDT_ADDRESS:
             return False
-        else:
-            return None
+
+        return None
 
 
     async def sqrtPriceX96_to_price(self, sqrtPriceX96: int) -> Decimal:
@@ -153,7 +197,16 @@ class OkxTrade:
         return price * (Decimal(10) ** exp)
 
     async def handle_event(self, e, side1):
-        args = e["args"]
+        # Диспетчер по типу пула - раньше эта функция безусловно читала
+        # args["sqrtPriceX96"] (V3-only), из-за чего для V2-пары она бы падала на
+        # каждом Swap-событии (KeyError) и цена/резервы никогда бы не обновлялись
+        # после первого чтения при старте. Теперь два явных пути.
+        if self.pool_kind == 'v2':
+            await self._handle_v2_swap_event(e["args"])
+        else:
+            await self._handle_v3_swap_event(e["args"], side1)
+
+    async def _handle_v3_swap_event(self, args, side1):
         amount0 = args['amount0']
         amount1 = args['amount1']
         sqrtPriceX96 = args["sqrtPriceX96"]
@@ -175,6 +228,44 @@ class OkxTrade:
             if amount1 < 0:
                 self.rak = price_corr
                 self.sell = price_corr * DEX_SELL_MARKDOWN
+
+            # Кэшируем свежее состояние тика для quote_local() - тот же outlier-гейт,
+            # что и для self.rak, чтобы не подмешивать в локальную модель выброс.
+            if self._local_quote_ready:
+                self.v3_sqrt_price_x96 = sqrtPriceX96
+                self.v3_liquidity = args.get('liquidity', self.v3_liquidity)
+                self.v3_tick = args.get('tick', self.v3_tick)
+
+    async def _handle_v2_swap_event(self, args):
+        # Стандартный V2 Swap: amount0In/amount1In/amount0Out/amount1Out - дельты
+        # резервов пары. Обновляем резервы инкрементально (без лишнего RPC) и
+        # пересчитываем rak/buy/sell из них же, тем же способом, что get_rak()
+        # использует при старте.
+        if self.v2_reserve0_raw is None or self.v2_reserve1_raw is None:
+            return
+        amount0_in = args.get('amount0In', 0)
+        amount1_in = args.get('amount1In', 0)
+        amount0_out = args.get('amount0Out', 0)
+        amount1_out = args.get('amount1Out', 0)
+        new_reserve0 = self.v2_reserve0_raw + amount0_in - amount0_out
+        new_reserve1 = self.v2_reserve1_raw + amount1_in - amount1_out
+        if new_reserve0 <= 0 or new_reserve1 <= 0:
+            return
+
+        price_token1_in_token0 = (new_reserve0 / (10 ** self.decimals_in)) / (new_reserve1 / (10 ** self.decimals_out))
+        price_corr = float(1 / price_token1_in_token0)
+
+        if abs(price_corr - self.rak) <= self.rak * PRICE_OUTLIER_THRESHOLD:
+            self.v2_reserve0_raw = new_reserve0
+            self.v2_reserve1_raw = new_reserve1
+            self.last_price_update_ts = time()
+            self._stale_notified = False
+            self.rak = price_corr
+            self.buy = price_corr * DEX_BUY_MARKUP
+            self.sell = price_corr * DEX_SELL_MARKDOWN
+        # Если отклонение похоже на выброс - резервы НЕ обновляем (событие
+        # отбрасывается целиком, включая эффект на локальные резервы), иначе
+        # разовая аномалия постоянно испортит базу для следующих котировок.
 
     async def get_rak(self, side, contract):
 
@@ -202,6 +293,281 @@ class OkxTrade:
             print(f"Error in execute rak price: {e}")
             return 1.0
 
+    # === Локальная (без RPC) проекция DEX-цены под объём сделки =========================
+    # Идея: self.rak/self.buy/self.sell - это mid-цена пула ± плоский маркап, одинаковый
+    # для любого объёма. Реальный price impact в AMM растёт нелинейно с объёмом
+    # относительно ликвидности, поэтому для сравнения с конкретным уровнем стакана MEXC
+    # (конкретный объём) нужна цена, спроецированная именно под этот объём.
+    # quote_local() считает её без сети по состоянию, которое и так уже трекается через
+    # WS (резервы V2 / L+sqrtPriceX96 V3). confirm_price_onchain() - тяжёлая, но точная
+    # проверка одним RPC-вызовом, вызывается только под победившего кандидата.
+
+    async def _init_local_quote_state(self, pool):
+        try:
+            token0 = await pool.functions.token0().call()
+            token1 = await pool.functions.token1().call()
+            self.token0_addr = token0
+            self.token1_addr = token1
+
+            # Основной способ определить, какой токен - "стейбл": сверка с реальным
+            # контрактом ТОРГУЕМОГО токена этой пары (token_contract = contract_bsc из
+            # БД). Надёжно независимо от того, какой стейблкоин использует конкретный
+            # пул - в отличие от сверки с одной глобальной USDT_CONTRACT (см. side()).
+            token_lc = self.token_contract.lower() if self.token_contract else None
+            usdt_lc = self.USDT_ADDRESS.lower()
+            if token_lc and token0.lower() == token_lc:
+                self.usdt_is_token0 = False   # token0 - сам торгуемый токен -> token1 - стейбл
+            elif token_lc and token1.lower() == token_lc:
+                self.usdt_is_token0 = True    # token1 - сам торгуемый токен -> token0 - стейбл
+            elif token0.lower() == usdt_lc:
+                self.usdt_is_token0 = True
+            elif token1.lower() == usdt_lc:
+                self.usdt_is_token0 = False
+            else:
+                print(f"[{self.pair}] _init_local_quote_state: не удалось определить стейбл-сторону пула "
+                      f"(token_contract={self.token_contract}, USDT_CONTRACT={self.USDT_ADDRESS}, "
+                      f"token0={token0}, token1={token1}) - локальная проекция цены отключена для этой пары")
+                return
+
+            has_slot0 = any(item.get("type") == "function" and item.get("name") == "slot0" for item in self.abi)
+
+            if has_slot0:
+                self.pool_kind = 'v3'
+                self.v3_fee_ppm = await pool.functions.fee().call()
+                self.v3_liquidity = await pool.functions.liquidity().call()
+                slot0_data = await pool.functions.slot0().call()
+                self.v3_sqrt_price_x96 = slot0_data[0]
+                self.v3_tick = slot0_data[1] if len(slot0_data) > 1 else None
+                self._last_liquidity_resync_ts = time()
+            else:
+                self.pool_kind = 'v2'
+                r0, r1, _ = await pool.functions.getReserves().call()
+                self.v2_reserve0_raw = r0
+                self.v2_reserve1_raw = r1
+
+            self._local_quote_ready = True
+            print(f"[{self.pair}] Локальная проекция цены готова: pool_kind={self.pool_kind}, "
+                  f"usdt_is_token0={self.usdt_is_token0}")
+        except Exception as e:
+            print(f"[{self.pair}] _init_local_quote_state failed: {e} - локальная проекция цены отключена, "
+                  f"analyze_opportunities будет использовать плоский buy/sell как раньше")
+            self._local_quote_ready = False
+
+    async def _ensure_token_allowance(self, token_addr: str, min_allowance: int = 2 ** 100) -> bool:
+        """Проверяет allowance токена к роутеру и при нехватке отправляет approve()
+        (РЕАЛЬНАЯ on-chain транзакция, ждём receipt). Логика идентична инлайновой
+        проверке в swap_universal_async (специально не рефакторил их в одну функцию -
+        не хотел трогать уже проверенный реальный торговый путь ради этого фикса).
+        Approve нужен на весь баланс токена сразу (2**100 ~ бесконечность) - делается
+        по факту ОДИН РАЗ НАВСЕГДА на пару кошелёк+токен+роутер, дальше allowance
+        просто лежит в сети между перезапусками бота."""
+        try:
+            token_contract = self.rpc.eth.contract(address=Web3.to_checksum_address(token_addr), abi=self.erc20_abi)
+            allowance = await token_contract.functions.allowance(self.from_addr, self.router_addr).call()
+            if allowance >= min_allowance:
+                return True
+
+            print(f"[{self.pair}] allowance для {token_addr} -> router недостаточен ({allowance}), "
+                  f"отправляю approve() (реальная tx, разово)")
+            nonce = await self.rpc.eth.get_transaction_count(self.from_addr)
+            tx = await token_contract.functions.approve(self.router_addr, 2 ** 100).build_transaction({
+                'from': self.from_addr,
+                'nonce': nonce,
+                'gasPrice': await self.rpc.eth.gas_price,
+                'gas': 100000,
+            })
+            signed = await asyncio.to_thread(Account.sign_transaction, tx, self.private_key)
+            tx_hash = await self.rpc.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = await self.rpc.eth.wait_for_transaction_receipt(tx_hash)
+            ok = receipt.status == 1
+            print(f"[{self.pair}] approve({token_addr}) -> {'OK' if ok else 'REVERTED'}, tx={tx_hash.hex()}")
+            return ok
+        except Exception as e:
+            print(f"[{self.pair}] _ensure_token_allowance({token_addr}) failed: {e}")
+            return False
+
+    async def _ensure_router_allowances(self):
+        """Разово при старте пары гарантирует approve роутеру на ОБА токена пула.
+        Нужно и для confirm_price_onchain (иначе его exactInputSingle().call() штатно
+        рвётся 'STF' - TransferHelper.safeTransferFrom требует allowance даже для
+        read-only .call(), а не только для реальной транзакции), и в любом случае
+        понадобится перед первой настоящей сделкой в swap_universal_async - просто
+        делаем это заранее, а не откладываем до первого реального свопа."""
+        if self.token0_addr is None or self.token1_addr is None:
+            return
+        for token_addr in (self.token0_addr, self.token1_addr):
+            await self._ensure_token_allowance(token_addr)
+
+    async def _resync_v3_liquidity(self, pool):
+        try:
+            self.v3_liquidity = await pool.functions.liquidity().call()
+            self._last_liquidity_resync_ts = time()
+        except Exception as e:
+            print(f"[{self.pair}] liquidity() resync failed: {e}")
+
+    def _virtual_v3_reserves_human(self) -> Optional[Tuple[float, float]]:
+        """"Виртуальные" резервы V3-пула в пределах ТЕКУЩЕГО тика: x=L/sqrtP, y=L*sqrtP.
+        Внутри активного тика V3-пул математически неотличим от V2-пары с такими
+        резервами (Uniswap V3 whitepaper, 6.1) - это и позволяет переиспользовать одну
+        constant-product формулу для V2 и V3. За пределами тика точность падает, поэтому
+        quote_local() дополнительно считает impact_pct и просит on-chain подтверждение
+        при большом отклонении."""
+        if self.v3_sqrt_price_x96 is None or self.v3_liquidity is None or self.usdt_is_token0 is None:
+            return None
+        try:
+            sqrt_p = Decimal(self.v3_sqrt_price_x96) / (Decimal(2) ** 96)
+            if sqrt_p <= 0:
+                return None
+            L = Decimal(self.v3_liquidity)
+            reserve0_raw = L / sqrt_p
+            reserve1_raw = L * sqrt_p
+            dec0, dec1 = (18, self.decimals_out) if self.usdt_is_token0 else (self.decimals_out, 18)
+            reserve0_human = float(reserve0_raw / (Decimal(10) ** dec0))
+            reserve1_human = float(reserve1_raw / (Decimal(10) ** dec1))
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+        return (reserve0_human, reserve1_human) if self.usdt_is_token0 else (reserve1_human, reserve0_human)
+
+    def _v2_reserves_human(self) -> Optional[Tuple[float, float]]:
+        if self.v2_reserve0_raw is None or self.v2_reserve1_raw is None or self.usdt_is_token0 is None:
+            return None
+        dec0, dec1 = (18, self.decimals_out) if self.usdt_is_token0 else (self.decimals_out, 18)
+        r0 = self.v2_reserve0_raw / (10 ** dec0)
+        r1 = self.v2_reserve1_raw / (10 ** dec1)
+        return (r0, r1) if self.usdt_is_token0 else (r1, r0)
+
+    @staticmethod
+    def _constant_product_quote(reserve_in: float, reserve_out: float, amount_in: float, fee_rate: float) -> float:
+        """x*y=k с комиссией на входе. Используется и для реальных резервов V2, и для
+        "виртуальных" резервов V3 в пределах текущего тика - см. _virtual_v3_reserves_human."""
+        if reserve_in <= 0 or reserve_out <= 0 or amount_in <= 0:
+            return 0.0
+        amount_in_after_fee = amount_in * (1 - fee_rate)
+        denom = reserve_in + amount_in_after_fee
+        if denom <= 0:
+            return 0.0
+        return (amount_in_after_fee * reserve_out) / denom
+
+    def _log_fallback_once(self, reason_key: str, message: str):
+        if reason_key in self._logged_fallback_reasons:
+            return
+        self._logged_fallback_reasons.add(reason_key)
+        print(f"[{self.pair}] quote_local -> fallback на плоский buy/sell ({reason_key}): {message}")
+
+    def quote_local(self, amount_in_human: float, is_buy: bool) -> Optional[dict]:
+        """Локальная (без RPC) оценка эффективной DEX-цены под конкретный объём.
+        is_buy=True: тратим amount_in_human USDT, получаем токен (аналог self.buy).
+        is_buy=False: тратим amount_in_human токена, получаем USDT (аналог self.sell).
+        Возвращает None, если состояние ещё не готово (в analyze_opportunities в этом
+        случае нужно откатиться на плоский self.buy/self.sell как раньше). Каждая
+        причина возврата None логируется РОВНО ОДИН РАЗ (см. _log_fallback_once) -
+        иначе она молча тонет в потоке 'BEST: ...' из analyze_opportunities и создаёт
+        впечатление, что новая логика работает, хотя на деле всегда идёт fallback."""
+        if not DEX_LOCAL_PROJECTION_ENABLED:
+            return None
+        if not self._local_quote_ready:
+            self._log_fallback_once('not_ready', "_local_quote_ready=False (см. сообщение "
+                                     "_init_local_quote_state failed / 'ни token0 ни token1' в логах при старте)")
+            return None
+        if amount_in_human <= 0:
+            return None
+
+        if self.pool_kind == 'v3':
+            reserves = self._virtual_v3_reserves_human()
+            fee_rate = (self.v3_fee_ppm / 1_000_000) if self.v3_fee_ppm is not None else DEFAULT_PANCAKE_FEE_RATE
+        else:
+            reserves = self._v2_reserves_human()
+            fee_rate = DEFAULT_PANCAKE_FEE_RATE
+
+        if reserves is None:
+            self._log_fallback_once('no_reserves', f"резервы недоступны (pool_kind={self.pool_kind}, "
+                                     f"v3_liquidity={self.v3_liquidity}, v3_sqrt_price_x96={self.v3_sqrt_price_x96}, "
+                                     f"v2_reserve0={self.v2_reserve0_raw}, v2_reserve1={self.v2_reserve1_raw})")
+            return None
+        reserve_usdt, reserve_token = reserves
+        if reserve_usdt <= 0 or reserve_token <= 0:
+            self._log_fallback_once('bad_reserves', f"резервы <= 0 (usdt={reserve_usdt}, token={reserve_token})")
+            return None
+        mid_price = reserve_usdt / reserve_token
+
+        if is_buy:
+            amount_out = self._constant_product_quote(reserve_usdt, reserve_token, amount_in_human, fee_rate)
+            if amount_out <= 0:
+                return None
+            effective_price = amount_in_human / amount_out
+        else:
+            amount_out = self._constant_product_quote(reserve_token, reserve_usdt, amount_in_human, fee_rate)
+            if amount_out <= 0:
+                return None
+            effective_price = amount_out / amount_in_human
+
+        # impact_pct считаем ДО буфера DEX_BUY_MARKUP/SELL_MARKDOWN - это чистый AMM
+        # price impact от объёма сделки. Раньше буфер попадал в impact_pct раньше этой
+        # строки, из-за чего impact был искусственно завышен на фиксированную величину
+        # буфера независимо от объёма - искажало и сравнение с порогом подтверждения,
+        # и диагностику (impact_pct переставал отражать реальный размер проскальзывания).
+        impact_pct = abs(effective_price - mid_price) / mid_price * 100 if mid_price > 0 else 0.0
+        needs_confirmation = self.pool_kind == 'v3' and impact_pct >= DEX_V3_IMPACT_CONFIRM_THRESHOLD_PCT
+        effective_price *= DEX_BUY_MARKUP if is_buy else DEX_SELL_MARKDOWN
+
+        return {
+            'amount_out': amount_out,
+            'effective_price': effective_price,
+            'mid_price': mid_price,
+            'impact_pct': impact_pct,
+            'needs_confirmation': needs_confirmation,
+            'pool_kind': self.pool_kind,
+        }
+
+    async def confirm_price_onchain(self, amount_in_human: float, is_buy: bool,
+                                     timeout: float = DEX_ONCHAIN_CONFIRM_TIMEOUT_SECONDS) -> Optional[float]:
+        """Единичный, жёстко ограниченный по времени on-chain запрос реальной котировки
+        под конкретный объём - подтверждение quote_local() ПЕРЕД тем как брать сделку в
+        работу (а не после, как в swap_universal_async на этапе реального свопа).
+        Намеренно бьёт только в известный пул/fee-тир (без перебора маршрутов, как в
+        swap_universal_async), чтобы уложиться в маленький таймаут.
+        Возвращает None при таймауте/ошибке - вызывающий код обязан пропустить сделку
+        на этой итерации, а не доверять неподтверждённой локальной модели."""
+        if self.token0_addr is None or self.token1_addr is None or self.usdt_is_token0 is None:
+            return None
+        if amount_in_human <= 0:
+            return None
+
+        token_usdt = self.token0_addr if self.usdt_is_token0 else self.token1_addr
+        token_other = self.token1_addr if self.usdt_is_token0 else self.token0_addr
+        if is_buy:
+            token_in, token_out, decimals_in, decimals_out = token_usdt, token_other, 18, self.decimals_out
+        else:
+            token_in, token_out, decimals_in, decimals_out = token_other, token_usdt, self.decimals_out, 18
+
+        amount_in_raw = int(amount_in_human * (10 ** decimals_in))
+        if amount_in_raw <= 0:
+            return None
+
+        async def _call():
+            token_in_addr = Web3.to_checksum_address(token_in)
+            token_out_addr = Web3.to_checksum_address(token_out)
+            if self.pool_kind == 'v3' and self.v3_fee_ppm is not None:
+                params = (token_in_addr, token_out_addr, self.v3_fee_ppm, self.from_addr, amount_in_raw, 1, 0)
+                res = await self.router.functions.exactInputSingle(params).call({'from': self.from_addr})
+            else:
+                path = [token_in_addr, token_out_addr]
+                res = await self.router.functions.swapExactTokensForTokens(
+                    amount_in_raw, 1, path, self.from_addr
+                ).call({'from': self.from_addr})
+            return int(res[0]) if isinstance(res, (list, tuple)) and len(res) >= 1 else int(res)
+
+        try:
+            amount_out_raw = await asyncio.wait_for(_call(), timeout=timeout)
+        except Exception as e:
+            print(f"[{self.pair}] confirm_price_onchain: {e}")
+            return None
+
+        amount_out_human = amount_out_raw / (10 ** decimals_out)
+        if amount_out_human <= 0:
+            return None
+        return (amount_in_human / amount_out_human) if is_buy else (amount_out_human / amount_in_human)
+
     async def monitoring_price(self):
         self.backoff = 1
         print("Start 2")
@@ -209,6 +575,20 @@ class OkxTrade:
         pool = self.rpc.eth.contract(address=self.address, abi=self.abi)
         side = await self.side(pool)
         self.rak = await self.get_rak(side, pool)
+        # Инициализируем состояние для локальной (без RPC) проекции цены под объём -
+        # см. quote_local(). Делается один раз при старте; не критично для базовой
+        # работы бота, поэтому ошибка тут только гасит фичу (_local_quote_ready=False),
+        # а не валит мониторинг цены.
+        await self._init_local_quote_state(pool)
+        # Разовый (навсегда, между перезапусками бота allowance сохраняется в сети)
+        # approve роутеру на оба токена пула - без него confirm_price_onchain падает
+        # с revert 'STF' (TransferHelper.safeTransferFrom требует allowance даже для
+        # read-only .call()), а реальный своп в swap_universal_async всё равно
+        # потребовал бы approve при первой сделке. ВНИМАНИЕ: это реальная on-chain
+        # транзакция (небольшой газ в BNB) - отправляется независимо от test_mode,
+        # т.к. test_mode влияет только на решение "торговать или нет" в trade.py,
+        # а не на подготовительные шаги здесь.
+        await self._ensure_router_allowances()
         # Сразу выставляем buy/sell из свежепрочитанной цены пула, чтобы не
         # ждать первого живого свопа - иначе buy/sell остаются 0 с момента
         # __init__, и trade.py тут же шлёт "цена DEX недоступна/устарела",
@@ -253,7 +633,16 @@ class OkxTrade:
                         self.buy = 0
                         self.sell = 0
 
-                    await asyncio.sleep(0.05) 
+                    # Периодический ресинк liquidity() для V3 - Swap-события несут
+                    # свежие sqrtPriceX96/liquidity/tick, но не ловят изменение
+                    # ликвидности от Mint/Burn (добавление/вывод LP), на которые
+                    # бот не подписан. Раз в DEX_V3_LIQUIDITY_RESYNC_SECONDS сверяем
+                    # через отдельный RPC-вызов, вне горячего пути анализа сделок.
+                    if (self.pool_kind == 'v3' and self._local_quote_ready
+                            and (time() - self._last_liquidity_resync_ts) > DEX_V3_LIQUIDITY_RESYNC_SECONDS):
+                        await self._resync_v3_liquidity(pool)
+
+                    await asyncio.sleep(0.05)
 
                 except (websockets.ConnectionClosedError, OSError) as e:
                     print(f"WS disconnected: {e}. Reconnecting in {self.backoff}s")

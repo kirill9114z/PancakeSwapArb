@@ -30,7 +30,7 @@ async def monitor_pair(pair_name, db, chat_id, bot):
         'enableRateLimit': True,
         'timeout': MEXC_CCXT_TIMEOUT_MS
     })
-    pancake = OkxTrade(pair_name, pair_data['address_contract'], pair_data['abi'], pair_data['decimals'], rak, pair_data["private_key"], pair_data["websocket"], pair_data['rpc'] ,db)
+    pancake = OkxTrade(pair_name, pair_data['address_contract'], pair_data['abi'], pair_data['decimals'], rak, pair_data["private_key"], pair_data["websocket"], pair_data['rpc'] ,db, token_contract=pair_data['contract_bsc'])
     arbitrage = Arbitrage(mexc_client, pair_name, pancake, pair_data["private_key"], pair_data['contract_bsc'],pair_data["rpc"], bot, chat_id, db, pair_data['volume'])
     active_arbitrage_instances[pair_name] = arbitrage
     arbitrage.running = True
