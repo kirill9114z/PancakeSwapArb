@@ -1,11 +1,18 @@
+"""Оркестрация: запуск и остановка мониторинга по каждой торговой паре.
+
+На каждую пару из БД создаётся ИЗОЛИРОВАННЫЙ комплект объектов - свой клиент
+MEXC, свой OkxTrade (пул на BSC) и свой Arbitrage, - и две вечные задачи:
+слежение за ценой пула по вебсокету и цикл анализа возможностей. Пары ничего не
+делят между собой, поэтому остановка одной не задевает остальные.
+"""
 import sys
 import asyncio
-from trade import Arbitrage
-from database import Database
+from arb.core.arbitrage import Arbitrage
+from arb.storage.database import Database
 import logging
 import ccxt.async_support as ccxt
 
-from pancake_trade import OkxTrade
+from arb.dex.pancake import OkxTrade
 from config import INITIAL_RAK_PRICE, MEXC_CCXT_TIMEOUT_MS, PAIR_STARTUP_DELAY_SECONDS
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

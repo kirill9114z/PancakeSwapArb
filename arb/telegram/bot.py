@@ -1,3 +1,12 @@
+"""Telegram-интерфейс: единственная точка управления ботом.
+
+Здесь только UI и CRUD пар в БД - никакой торговой логики. Запуск/остановка
+торговли сводится к созданию/отмене задачи arb.core.runner.main.
+
+Все обработчики намеренно живут в одном модуле: aiogram регистрирует их в
+порядке объявления через общий Dispatcher, и разнос по файлам менял бы порядок
+разрешения хендлеров.
+"""
 import logging
 
 import aiohttp
@@ -6,45 +15,21 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 import aiofiles
 import os
 from aiogram.types import ContentType
-from database import Database
+from arb.storage.database import Database
 import asyncio
-from exchange import get_session
-from main import main as arb_main
-from main import active_arbitrage_instances
+from arb.core.runner import main as arb_main
+from arb.core.runner import active_arbitrage_instances
+from arb.paths import PAIR_ABI_DIR
+from arb.telegram.states import Form
 
 from config import BOT_TOKEN, SPREAD_INPUT_MIN_PCT, SPREAD_INPUT_MAX_PCT
 
 db = Database()
 arb_task: asyncio.Task | None = None
-class Form(StatesGroup):
-    SETTINGS = State()
-    GLOBAL_SPREAD_INPUT = State()
-    INDIVIDUAL_SPREAD_SELECT = State()
-    INDIVIDUAL_SPREAD_INPUT = State()
-    PAIRS_MENU = State()
-    ADD_PAIR_NAME = State()
-    ADD_PAIR_CONTRACT = State()
-    ADD_PAIR_DECIMALS = State()
-    REMOVE_PAIR_SELECT = State()
-    UID_INPUT = State()
-    PRIVATE_KEY_INPUT = State()
-    ADD_PAIR_MEXC_API_KEY = State()
-    ADD_PAIR_MEXC_API_SECRET = State()
-    ADD_PAIR_MEXC_UID = State()
-    ADD_PAIR_PRIVATE_KEY = State()
-    ADD_PAIR_RPC = State()
-    ADD_PAIR_WEBSOCKET = State()
-    ADD_PAIR_ADDRESS_CONTRACT = State()
-    ADD_PAIR_ABI_CONTRACT = State()
-    ADD_PAIR_MAX_VOL = State()
-    UPDATE_UID_PAIR = State()
-    UID_INPUT2 = State()
-
 
 bot_process = None
 bot = Bot(token=BOT_TOKEN)
@@ -391,10 +376,9 @@ async def process_pair_abi(message: types.Message, state: FSMContext):
 
         pair = pair_name.split('/')[0]
         abi_filename = f"{pair}.json"
-        abi_folder = "pair_abi"
-        abi_filepath = os.path.join(abi_folder, abi_filename)
+        abi_filepath = os.path.join(PAIR_ABI_DIR, abi_filename)
 
-        os.makedirs(abi_folder, exist_ok=True)
+        os.makedirs(PAIR_ABI_DIR, exist_ok=True)
 
         try:
             async with aiofiles.open(abi_filepath, 'w', encoding='utf-8') as f:
@@ -548,8 +532,3 @@ async def request_new_uid(chat_id: int):
         chat_id,
         "⚠️ Ваш U_ID устарел. Пожалуйста, введите новый U_ID:"
     )
-
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main1())

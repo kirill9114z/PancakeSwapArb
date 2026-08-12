@@ -4,13 +4,15 @@
 Если пересечение есть - две "независимые" пары на самом деле торгуют
 одним и тем же кошельком/аккаунтом MEXC, и их сделки будут влиять друг на друга.
 
-Запуск (там, где реально лежит рабочая arbitrage_bot.db, например на сервере):
-    python check_pair_isolation.py
-    python check_pair_isolation.py /path/to/arbitrage_bot.db
+Запуск из корня репозитория (там, где лежит рабочая arbitrage_bot.db):
+    python -m arb.tools.check_pair_isolation
+    python -m arb.tools.check_pair_isolation /path/to/arbitrage_bot.db
 """
 import sqlite3
 import sys
 from collections import defaultdict
+
+from arb.paths import DB_PATH as DEFAULT_DB_PATH
 
 # На Windows консоль иногда использует cp1251 и не может напечатать emoji/⚠ -
 # переключаемся на UTF-8 с заменой недопустимых символов, чтобы скрипт не падал.
@@ -19,7 +21,7 @@ try:
 except Exception:
     pass
 
-DB_PATH = sys.argv[1] if len(sys.argv) > 1 else "arbitrage_bot.db"
+DB_PATH = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_DB_PATH)
 
 FIELDS_TO_CHECK = [
     "private_key",

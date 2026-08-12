@@ -1,9 +1,17 @@
+"""SQLite-хранилище: торговые пары с ключами, глобальный и индивидуальный спред.
+
+Схема создаётся при первом обращении (_init_db). Путь к файлу БД по умолчанию
+берётся из arb.paths, чтобы бот и диагностические скрипты работали с одной и той
+же базой независимо от текущей директории запуска.
+"""
 import sqlite3
 from contextlib import closing
 
+from arb.paths import DB_PATH
+
 
 class Database:
-    def __init__(self, db_name='arbitrage_bot.db'):
+    def __init__(self, db_name=str(DB_PATH)):
         self.db_name = db_name
         self._init_db()
 

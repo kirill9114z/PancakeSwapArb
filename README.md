@@ -56,16 +56,54 @@ BOT_TOKEN=your_telegram_bot_token
 ### 5. Запуск
 ```bash
 # Тестовый запуск
-python bot.py
+python run.py
 
 # Фоновый режим (screen)
 screen -S bot
 source venv/bin/activate
-python bot.py
+python run.py
 # Ctrl+A, D — свернуть
 
 # Systemd сервис
 sudo systemctl start arbitrage-bot
+```
+
+## 📁 Структура проекта
+
+```
+run.py                  Точка входа: поднимает Telegram-интерфейс
+config.py               Все настройки и пороги (создаётся из config.py.example)
+abi/                    Общие ABI: роутер PancakeSwap, ERC20, Multicall3
+pair_abi/               ABI пулов конкретных пар (сохраняет бот)
+
+arb/
+├── paths.py            Пути к файлам проекта
+├── storage/            SQLite: пары, ключи, спреды
+├── exchanges/          MEXC: приватное веб-API для выставления ордеров
+├── dex/                PancakeSwap
+│   ├── pancake.py      OkxTrade: сборка объекта пула + WS-цикл цены
+│   ├── pool_state.py   Цена и резервы пула, обработка событий Swap
+│   ├── quoting.py      Котировка под объём: локальная и on-chain
+│   ├── swap_fast.py    Быстрый своп через известный пул (горячий путь)
+│   ├── swap_universal.py  Универсальный своп с поиском маршрута (фоллбэк)
+│   ├── allowances.py   Approve роутеру
+│   └── types.py        SwapResult / SwapErrorType
+├── core/               Торговая логика
+│   ├── arbitrage.py    Arbitrage: анализ возможностей, остановка пары
+│   ├── balances.py     Балансы на MEXC и в кошельке BSC
+│   ├── market_data.py  Стакан MEXC, оценка комиссий
+│   ├── orderbook.py    Чистая математика по стакану (без сети)
+│   ├── execution.py    Исполнение сделки: ордер + хедж
+│   ├── emergency.py    Аварийное закрытие позиции, если хедж не прошёл
+│   └── runner.py       Запуск мониторинга по каждой паре
+├── telegram/           Интерфейс управления (aiogram)
+└── tools/              Диагностика (не участвует в работе бота)
+```
+
+Диагностика:
+```bash
+python -m arb.tools.debug_quote_local [ПАРА]   # локальная цена против on-chain
+python -m arb.tools.check_pair_isolation       # не делят ли пары кошелёк/аккаунт
 ```
 
 ## ⚙️ Конфигурация

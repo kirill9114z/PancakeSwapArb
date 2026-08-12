@@ -7,16 +7,16 @@
 используется в реальном свопе). Не отправляет никаких транзакций - только
 .call() (staticcall), газ не тратится, баланс не трогается.
 
-Использование:
-    python debug_quote_local.py [ИМЯ_ПАРЫ]
+Использование (из корня репозитория):
+    python -m arb.tools.debug_quote_local [ИМЯ_ПАРЫ]
 
 Если имя не указано - берётся первая пара из БД.
 """
 import asyncio
 import sys
 
-from database import Database
-from pancake_trade import OkxTrade
+from arb.storage.database import Database
+from arb.dex.pancake import OkxTrade
 from config import INITIAL_RAK_PRICE
 
 
