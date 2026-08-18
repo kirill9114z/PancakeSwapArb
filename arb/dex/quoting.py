@@ -123,18 +123,37 @@ class LocalQuoteMixin:
             if amount_out <= 0:
                 return None
             effective_price = amount_in_human / amount_out
+            # Цена при объёме, стремящемся к нулю: комиссия пула уже учтена, price impact
+            # ещё нет. Это и есть точка отсчёта для impact_pct - см. комментарий ниже.
+            reference_price = mid_price / (1 - fee_rate) if fee_rate < 1 else mid_price
         else:
             amount_out = self._constant_product_quote(reserve_token, reserve_usdt, amount_in_human, fee_rate)
             if amount_out <= 0:
                 return None
             effective_price = amount_out / amount_in_human
+            reference_price = mid_price * (1 - fee_rate)
 
         # impact_pct считаем ДО буфера DEX_BUY_MARKUP/SELL_MARKDOWN - это чистый AMM
         # price impact от объёма сделки. Раньше буфер попадал в impact_pct раньше этой
         # строки, из-за чего impact был искусственно завышен на фиксированную величину
         # буфера независимо от объёма - искажало и сравнение с порогом подтверждения,
         # и диагностику (impact_pct переставал отражать реальный размер проскальзывания).
-        impact_pct = abs(effective_price - mid_price) / mid_price * 100 if mid_price > 0 else 0.0
+        #
+        # ВТОРАЯ (более дорогая) версия той же ошибки: точкой отсчёта был mid_price, то есть
+        # цена БЕЗ комиссии пула, а effective_price комиссию уже содержит (она вшита в
+        # _constant_product_quote через amount_in * (1 - fee_rate)). Из-за этого impact_pct
+        # никогда не опускался ниже ставки пула - при объёме -> 0 он равнялся ровно
+        # 0.05% / 0.25% / 0.3% вместо нуля. С порогом подтверждения в 0.01% (и даже 0.3%)
+        # это означало needs_confirmation=True ВСЕГДА и для ЛЮБОГО объёма, то есть:
+        #   - analyze_opportunities дёргал confirm_price_onchain на каждой итерации;
+        #   - swap_fast._estimate_amount_out_raw для V3 никогда не брал локальную оценку и
+        #     ходил в сеть перед каждым свопом, обнуляя весь смысл быстрого пути.
+        # Теперь отсчёт идёт от reference_price - цены того же свопа с той же комиссией, но
+        # при объёме -> 0. impact_pct стал ЧИСТЫМ проскальзыванием от размера сделки, и
+        # порог DEX_V3_IMPACT_CONFIRM_THRESHOLD_PCT наконец означает то, что написано в
+        # его комментарии: "насколько далеко сделка уводит цену от текущей точки".
+        impact_pct = (abs(effective_price - reference_price) / reference_price * 100
+                      if reference_price > 0 else 0.0)
         needs_confirmation = self.pool_kind == 'v3' and impact_pct >= DEX_V3_IMPACT_CONFIRM_THRESHOLD_PCT
         effective_price *= DEX_BUY_MARKUP if is_buy else DEX_SELL_MARKDOWN
 
@@ -142,9 +161,17 @@ class LocalQuoteMixin:
             'amount_out': amount_out,
             'effective_price': effective_price,
             'mid_price': mid_price,
+            # Цена без price impact, но с комиссией пула - точка отсчёта для impact_pct.
+            'reference_price': reference_price,
             'impact_pct': impact_pct,
             'needs_confirmation': needs_confirmation,
             'pool_kind': self.pool_kind,
+            # Комиссия пула УЖЕ вычтена из effective_price. Флаг нужен вызывающему коду
+            # (arb.core.market_data._calc_buy_mecx_fee), чтобы не вычесть её второй раз:
+            # при fallback на плоские self.buy/self.sell комиссии в цене нет, и там
+            # вычитать её обязательно.
+            'fee_included': True,
+            'fee_rate': fee_rate,
         }
 
     async def confirm_price_onchain(self, amount_in_human: float, is_buy: bool,

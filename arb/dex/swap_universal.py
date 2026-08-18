@@ -326,7 +326,14 @@ class UniversalSwapMixin:
                             error_msg=f"Swap reverted: {tx_hash.hex()}"
                         )
 
-                return SwapResult(success=True, tx_hash=tx_hash.hex())
+                # Фактический расход газа - в оценку стоимости следующего хеджа
+                # (_calc_buy_mecx_fee) и в журнал исполнений, так же как в swap_fast.
+                self.last_gas_used = int(receipt.gasUsed)
+                return SwapResult(success=True, tx_hash=tx_hash.hex(),
+                                  gas_used=int(receipt.gasUsed),
+                                  gas_price_wei=int(txn.get('gasPrice') or 0) or None,
+                                  amount_out_est_raw=chosen_amount_out_est,
+                                  quote_source='onchain')
 
             except Exception as e:
                 print(f'Attempt {attempt + 1} failed: {e}')

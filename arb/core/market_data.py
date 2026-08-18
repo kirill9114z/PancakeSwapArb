@@ -4,10 +4,19 @@
 возможностей, и для аварийного закрытия позиции - чтобы не завести второй,
 расходящийся с первым источник цены.
 """
+import time
+
 from arb.exchanges.mexc_web import get_session
 from config import (
+    BNB_PRICE_FALLBACK_USD,
+    BNB_PRICE_REFRESH_SECONDS,
+    DEFAULT_PANCAKE_FEE_RATE,
+    FEE_FLAT_USD,
     MEXC_DEPTH_HTTP_TIMEOUT_SECONDS,
     MEXC_ORDERBOOK_DEPTH_LEVELS,
+    MEXC_TAKER_FEE_RATE,
+    SWAP_GAS_USED_ESTIMATE_V2,
+    SWAP_GAS_USED_ESTIMATE_V3,
 )
 
 from .orderbook import compute_prefix_stats_with_max_sum
@@ -77,16 +86,83 @@ class MarketDataMixin:
 
 
 
-    async def _calc_buy_mecx_fee(self, volume, price):
-        # Раньше комиссия PancakeSwap оценивалась захардкоженной ставкой 0.025%,
-        # хотя реальные тиры комиссий V3 на BSC - 0.01%/0.05%/0.25%/0.3%, и для
-        # многих (особенно низколиквидных) пар используется именно старший тир.
-        # Это делало предварительную оценку прибыли систематически оптимистичной.
-        # Теперь берём комиссию РЕАЛЬНО найденного пула (кэшируется в OkxTrade
-        # после последнего свопа), а если она ещё не известна - используем
-        # консервативную оценку 0.25% вместо заниженной 0.025%.
-        pancake_fee_rate = getattr(self.pancakce, 'last_fee_rate', None) or 0.0025
-        fee_mexc = float(volume) * float(price) * 0.0005
-        fee_panckake = float(volume) * float(price) * pancake_fee_rate
-        fee = fee_mexc + fee_panckake + 0.01
-        return fee
+    async def _bnb_price_usd(self) -> float:
+        """Цена BNB в USD для перевода стоимости газа в доллары. Кешируется на
+        BNB_PRICE_REFRESH_SECONDS: значение нужно только для оценки прибыли, а лишний
+        сетевой вызов в цикле анализа (несколько раз в секунду) недопустим.
+        При любой ошибке возвращает намеренно ЗАВЫШЕННЫЙ BNB_PRICE_FALLBACK_USD -
+        переоценить стоимость газа и пропустить сделку безопаснее, чем недооценить."""
+        now = time.time()
+        if self._bnb_price_usd_cache and (now - self._last_fee_update) < BNB_PRICE_REFRESH_SECONDS:
+            return self._bnb_price_usd_cache
+        async with self._fee_lock:
+            # Пока ждали лок, цену мог обновить другой вызов.
+            if self._bnb_price_usd_cache and (time.time() - self._last_fee_update) < BNB_PRICE_REFRESH_SECONDS:
+                return self._bnb_price_usd_cache
+            try:
+                ticker = await self.exchange.fetch_ticker('BNB/USDT')
+                price = float(ticker['last'] or ticker['close'])
+                if price > 0:
+                    self._bnb_price_usd_cache = price
+                    self._last_fee_update = time.time()
+                    return price
+            except Exception as e:
+                print(f"[{self.pair}] не удалось прочитать цену BNB: {e} - "
+                      f"беру запасную ${BNB_PRICE_FALLBACK_USD}")
+            # Запоминаем и время неудачи тоже: иначе при недоступном тикере мы бы
+            # ходили за ним на КАЖДОЙ итерации анализа.
+            self._last_fee_update = time.time()
+            self._bnb_price_usd_cache = self._bnb_price_usd_cache or BNB_PRICE_FALLBACK_USD
+            return self._bnb_price_usd_cache
+
+    async def _estimate_gas_cost_usd(self) -> float:
+        """Стоимость газа одного хеджирующего свопа в USD.
+
+        Раньше на её месте стояла константа в один цент (FEE_FLAT_USD), то есть
+        стоимость хеджа считалась одинаковой при любой цене газа в сети. При
+        PROFIT_THRESHOLD_USD = 0.2 это заметная доля порога, и ошибка в обе стороны:
+        при дорогом газе бот брал убыточные сделки, при дешёвом - зря пропускал
+        прибыльные.
+
+        Считаем по ФАКТИЧЕСКИ израсходованному газу (last_gas_used из receipt
+        последнего свопа), а не по SWAP_GAS_LIMIT_*: лимит намеренно завышен с
+        запасом, а на BSC неизрасходованный газ возвращается."""
+        gas_used = getattr(self.pancakce, 'last_gas_used', None)
+        if not gas_used:
+            gas_used = (SWAP_GAS_USED_ESTIMATE_V3 if getattr(self.pancakce, 'pool_kind', None) == 'v3'
+                        else SWAP_GAS_USED_ESTIMATE_V2)
+        # Цена газа уже прогрета фоново в monitoring_price - в сеть за ней не идём.
+        gas_price_wei = getattr(self.pancakce, '_gas_price_wei', None)
+        if not gas_price_wei:
+            return FEE_FLAT_USD
+        gas_cost_bnb = (gas_used * gas_price_wei) / 1e18
+        return gas_cost_bnb * await self._bnb_price_usd()
+
+    async def _calc_buy_mecx_fee(self, volume, price, dex_fee_included: bool = False):
+        """Издержки сделки в USD: комиссия MEXC + (если нужно) комиссия пула + газ.
+
+        Про dex_fee_included - самое важное здесь. quote_local() считает выход свопа
+        по constant-product С комиссией пула (amount_in * (1 - fee_rate)), то есть
+        возвращаемый effective_price её УЖЕ содержит, и в profit кандидата она уже
+        вычтена. Раньше эта функция вычитала комиссию пула безусловно - то есть
+        второй раз. На объёме $100 и пуле 0.25% это лишние $0.25 при пороге прибыли
+        $0.2: порог фактически удваивался, и прибыльные сделки молча отсеивались.
+        Теперь комиссия пула вычитается ТОЛЬКО когда цена DEX пришла не из
+        quote_local/confirm_price_onchain, а из плоских self.pancakce.buy/sell -
+        там это чистая mid-цена ± маркап, комиссии в ней нет.
+
+        Про ставку пула: раньше здесь было захардкожено 0.025%, хотя реальные тиры V3
+        на BSC - 0.01%/0.05%/0.25%/0.3%, и низколиквидные пары обычно сидят на старшем.
+        Берём ставку РЕАЛЬНО использованного пула (кэш в OkxTrade после свопа),
+        иначе консервативный DEFAULT_PANCAKE_FEE_RATE."""
+        notional = float(volume) * float(price)
+        fee_mexc = notional * MEXC_TAKER_FEE_RATE
+
+        if dex_fee_included:
+            fee_pancake = 0.0
+        else:
+            pancake_fee_rate = getattr(self.pancakce, 'last_fee_rate', None) or DEFAULT_PANCAKE_FEE_RATE
+            fee_pancake = notional * pancake_fee_rate
+
+        gas_usd = await self._estimate_gas_cost_usd()
+        return fee_mexc + fee_pancake + gas_usd + FEE_FLAT_USD

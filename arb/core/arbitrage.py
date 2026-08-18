@@ -116,8 +116,18 @@ class Arbitrage(BalancesMixin, MarketDataMixin, EmergencyCloseMixin, TradeExecut
         self.WBNB = Web3.to_checksum_address(WBNB_ADDRESS)
         self.tes = self.pair.split('/')
         self.symbol = f"{self.tes[0]}_{self.tes[1]}"
+        # Кеш цены BNB в USD для перевода стоимости газа в доллары (см.
+        # MarketDataMixin._bnb_price_usd). _last_fee_update - момент последнего
+        # обновления кеша, _fee_lock - чтобы параллельные вызовы не устроили
+        # несколько запросов тикера подряд.
         self._last_fee_update = 0
         self._fee_lock = asyncio.Lock()
+        self._bnb_price_usd_cache = 0.0
+
+        # Журнал исполнений: запись ТЕКУЩЕЙ сделки, заполняется по ходу
+        # _make_trade_impl / handle_swap и пишется в БД один раз в make_trade.finally.
+        # Сериализовано через _trade_lock, поэтому обычного поля достаточно.
+        self._trade_record = None
 
 
     async def send_notification(self, message: str):
@@ -175,11 +185,17 @@ class Arbitrage(BalancesMixin, MarketDataMixin, EmergencyCloseMixin, TradeExecut
                     # self.pancakce.sell один и тот же для любого уровня стакана.
                     dex_quote = self.pancakce.quote_local(volume, is_buy=False)
                     if dex_quote is None:
+                        # Фоллбэк на плоскую цену: это mid-цена пула ± маркап, комиссии
+                        # пула в ней НЕТ - её обязан вычесть _calc_buy_mecx_fee.
                         okx_effective_price = float(okx_sell_price)
                         dex_needs_confirm = False
+                        dex_fee_included = False
+                        dex_impact_pct = None
                     else:
                         okx_effective_price = dex_quote['effective_price']
                         dex_needs_confirm = dex_quote['needs_confirmation']
+                        dex_fee_included = dex_quote['fee_included']
+                        dex_impact_pct = dex_quote['impact_pct']
 
                     profit = (okx_effective_price - mexc_price) * volume
                     if (float(volume) * float(mexc_price) <= self.max_volume) and float(volume) <= float(self.balance_token_dex):
@@ -196,6 +212,9 @@ class Arbitrage(BalancesMixin, MarketDataMixin, EmergencyCloseMixin, TradeExecut
                                 'level': i + 1,
                                 'time': time.time() - t,
                                 'dex_needs_confirm': dex_needs_confirm,
+                                'dex_fee_included': dex_fee_included,
+                                'dex_impact_pct': dex_impact_pct,
+                                'dex_price_source': 'flat' if dex_quote is None else 'local',
                             })
 
                 okx_buy_price = self.pancakce.buy
@@ -226,11 +245,17 @@ class Arbitrage(BalancesMixin, MarketDataMixin, EmergencyCloseMixin, TradeExecut
                     usdt_seed = volume * okx_buy_price
                     dex_quote = self.pancakce.quote_local(usdt_seed, is_buy=True)
                     if dex_quote is None:
+                        # См. комментарий в ветке BUY_MEXC выше: в плоской цене
+                        # комиссии пула нет, её вычтет _calc_buy_mecx_fee.
                         okx_effective_price = float(okx_buy_price)
                         dex_needs_confirm = False
+                        dex_fee_included = False
+                        dex_impact_pct = None
                     else:
                         okx_effective_price = dex_quote['effective_price']
                         dex_needs_confirm = dex_quote['needs_confirmation']
+                        dex_fee_included = dex_quote['fee_included']
+                        dex_impact_pct = dex_quote['impact_pct']
 
                     profit = (mexc_price - okx_effective_price) * volume
                     if (float(okx_buy_price) * float(volume) <= self.max_volume) and (volume <= self.balance_token_mexc):
@@ -247,6 +272,9 @@ class Arbitrage(BalancesMixin, MarketDataMixin, EmergencyCloseMixin, TradeExecut
                                 'level': i+1,
                                 'time': time.time() - t,
                                 'dex_needs_confirm': dex_needs_confirm,
+                                'dex_fee_included': dex_fee_included,
+                                'dex_impact_pct': dex_impact_pct,
+                                'dex_price_source': 'flat' if dex_quote is None else 'local',
                             })
 
                 if candidates:
@@ -276,23 +304,23 @@ class Arbitrage(BalancesMixin, MarketDataMixin, EmergencyCloseMixin, TradeExecut
                                   f"пропускаем итерацию, не берём сделку по неподтверждённой цене")
                             continue
                         best['dex'] = confirmed_price
+                        # Роутер возвращает РЕАЛЬНЫЙ amountOut, то есть комиссия пула в
+                        # подтверждённой цене тоже уже учтена - вычитать её отдельно нельзя.
+                        best['dex_fee_included'] = True
+                        best['dex_price_source'] = 'onchain'
                         if best['type'] == 'BUY_MEXC':
                             best['profit'] = (confirmed_price - best['mexc_price']) * best['volume']
                         else:
                             best['profit'] = (best['mexc_price'] - confirmed_price) * best['volume']
 
-                    fee = await self._calc_buy_mecx_fee(best['volume'], best['mexc_price'])
+                    fee = await self._calc_buy_mecx_fee(
+                        best['volume'], best['mexc_price'], best.get('dex_fee_included', False))
+                    best['fee'] = float(fee)
+                    best['profit'] -= float(fee)
                     print(f'BEST: {best}')
-                    if best['type'] == 'BUY_MEXC':
-                        best['profit'] -= float(fee)
-                        if best['profit'] >= self.PROFIT_THRESHOLD and not test_mode:
-                            print(f'10: {best}')
-                            # await self.make_trade(best, session)
-                    else:
-                        best['profit'] -= float(fee)
-                        if best['profit'] >= self.PROFIT_THRESHOLD and not test_mode:
-                            print(f'10: {best}')
-                            # await self.make_trade(best, session)
+                    if best['profit'] >= self.PROFIT_THRESHOLD and not test_mode:
+                        print(f'10: {best}')
+                        # await self.make_trade(best, session)
                 else:
                     continue
         except asyncio.CancelledError:

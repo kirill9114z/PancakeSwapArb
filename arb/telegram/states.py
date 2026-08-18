@@ -29,3 +29,4 @@ class Form(StatesGroup):
     ADD_PAIR_MAX_VOL = State()
     UPDATE_UID_PAIR = State()
     UID_INPUT2 = State()
+    STATS_SELECT = State()

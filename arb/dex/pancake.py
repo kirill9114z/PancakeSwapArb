@@ -99,6 +99,14 @@ class OkxTrade(PoolStateMixin, RouterAllowanceMixin, LocalQuoteMixin,
         # захардкоженной комиссии, которая может быть в разы ниже реальной комиссии пула.
         self.last_fee_rate = None
 
+        # Фактический расход газа последнего успешного свопа (из receipt.gasUsed).
+        # По той же логике, что и last_fee_rate: оценка стоимости хеджа в
+        # _calc_buy_mecx_fee должна опираться на измеренную величину, а не на константу.
+        # До первого свопа по паре берётся SWAP_GAS_USED_ESTIMATE_* из config.
+        # Считать по SWAP_GAS_LIMIT_* нельзя: лимит намеренно завышен, а на BSC
+        # неизрасходованный газ возвращается - платим только за gasUsed.
+        self.last_gas_used = None
+
         # === Локальная (без RPC) проекция цены под объём сделки, см. quote_local() ===
         # Тип пула, за которым мы наблюдаем через WS ('v3' или 'v2') - определяется один
         # раз в _init_local_quote_state() по наличию slot0() в ABI, как и в get_rak().

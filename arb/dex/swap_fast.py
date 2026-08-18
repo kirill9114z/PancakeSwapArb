@@ -446,7 +446,11 @@ class FastSwapMixin:
         # Комиссия реально использованного пула - для _calc_buy_mecx_fee в trade.py,
         # так же как это делает swap_universal_async.
         self.last_fee_rate = (self.v3_fee_ppm / 1_000_000) if self.pool_kind == 'v3' else DEFAULT_PANCAKE_FEE_RATE
+        # Фактический расход газа - туда же, в оценку стоимости следующего хеджа.
+        self.last_gas_used = int(receipt.gasUsed)
         print(f"[{self.pair}] swap_fast OK tx={tx_hash_hex} | подготовка {sent_at - t_start:.3f}s "
               f"(оценка {est_source}) | подтверждение {time() - sent_at:.2f}s | "
               f"gas_price {gas_price / 1e9:.3f} gwei | gas_used {receipt.gasUsed}")
-        return SwapResult(success=True, tx_hash=tx_hash_hex)
+        return SwapResult(success=True, tx_hash=tx_hash_hex,
+                          gas_used=int(receipt.gasUsed), gas_price_wei=int(gas_price),
+                          amount_out_est_raw=est_out_raw, quote_source=est_source)

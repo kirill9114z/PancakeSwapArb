@@ -109,6 +109,13 @@ class EmergencyCloseMixin:
 
         dust = target * MEXC_EMERGENCY_DUST_RATIO
         closed_total = 0.0
+        # Сумма (объём × цена) по закрытым кускам - чтобы записать в журнал среднюю
+        # цену возврата. Без неё оценка PnL не может отличить аварийное закрытие от
+        # удачной сделки: плановая цена DEX в записи остаётся прежней, и убыток
+        # выглядел бы прибылью. Берём выставленную (маркетабельную) цену - она хуже
+        # фактической цены исполнения, то есть оценка убытка получается
+        # консервативной, что здесь и нужно.
+        closed_notional = 0.0
         problems = []
 
         for attempt in range(1, MEXC_EMERGENCY_MAX_ATTEMPTS + 1):
@@ -164,6 +171,7 @@ class EmergencyCloseMixin:
 
             got = await self._await_order_result(order_id, MEXC_EMERGENCY_FILL_TIMEOUT_SECONDS)
             closed_total += got
+            closed_notional += got * price
             if got <= 0:
                 problems.append(f"попытка {attempt}: ордер {order_id} не исполнился вообще")
 
@@ -171,4 +179,6 @@ class EmergencyCloseMixin:
                 await asyncio.sleep(MEXC_EMERGENCY_ORDER_CHECK_DELAY_SECONDS)
 
         remaining = max(0.0, target - closed_total)
+        if closed_total > 0:
+            self._rec_set(emergency_avg_price=closed_notional / closed_total)
         return closed_total, remaining, problems

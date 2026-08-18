@@ -9,18 +9,50 @@
 import asyncio
 import time
 
+from arb.core.journal import TradeRecord
 from arb.dex.types import SwapErrorType
 from arb.exchanges.mexc_web import place_limit_order
 from config import (
     MEXC_EMERGENCY_DUST_RATIO,
     MEXC_ORDER_FILL_TIMEOUT_SECONDS,
     MEXC_ORDER_POLL_INTERVAL_SECONDS,
+    TRADE_JOURNAL_ENABLED,
     USDT_CONTRACT,
 )
 
 
 class TradeExecutionMixin:
     """Жизненный цикл одной сделки. Подмешивается в Arbitrage."""
+
+    # === Журнал исполнений ============================================================
+    # Три тонкие обёртки вокруг self._trade_record. Смысл в том, что запись может
+    # отсутствовать (TRADE_JOURNAL_ENABLED = False), и обкладывать каждое присваивание
+    # проверкой `if self._trade_record:` означало бы засорить и без того непростую
+    # логику сделки. Ни один из этих методов не имеет права бросить исключение:
+    # журналирование - побочный эффект, а не часть сделки.
+
+    def _rec_set(self, **fields):
+        rec = self._trade_record
+        if rec is None:
+            return
+        for name, value in fields.items():
+            setattr(rec, name, value)
+
+    def _rec_mark(self, name: str):
+        if self._trade_record is not None:
+            self._trade_record.mark(name)
+
+    def _rec_mexc_status(self, status):
+        """Снимает с ответа биржи фактический результат ноги на MEXC."""
+        if self._trade_record is None or not isinstance(status, dict):
+            return
+        try:
+            self._trade_record.mexc_filled = float(status.get('filled') or 0)
+            self._trade_record.mexc_status = status.get('status')
+            average = status.get('average') or status.get('price')
+            self._trade_record.mexc_avg_price = float(average) if average else None
+        except (TypeError, ValueError):
+            pass
 
     async def _fetch_status(self, order_id):
         """fetch_order + запоминание исполненного объёма. Нужно, чтобы страховка в
@@ -56,6 +88,14 @@ class TradeExecutionMixin:
         # в _make_trade_impl вмешиваться уже не нужно - иначе она могла бы запустить
         # второй, дублирующий откат поверх этого.
         self._hedge_settled = True
+        # Журнал: исход свопа и его стоимость в USD. Цена BNB берётся из того же
+        # кеша, что и оценка газа в _calc_buy_mecx_fee, - лишнего запроса нет.
+        self._rec_mark('t_swap_done')
+        gas_cost_usd = None
+        if getattr(val, 'gas_used', None) and getattr(val, 'gas_price_wei', None):
+            gas_cost_usd = (val.gas_used * val.gas_price_wei / 1e18) * await self._bnb_price_usd()
+        if self._trade_record is not None:
+            self._trade_record.apply_swap_result(val, gas_cost_usd)
 
         if val.success:
             direction = 'SELL_MX -> BUY_PNK' if best['type'] == 'SELL_MEXC' else 'SELL_PNK -> BUY_MX'
@@ -67,12 +107,14 @@ class TradeExecutionMixin:
                 f"Прибыль: ${best['profit']:.2f}\n"
                 f"Хэш: {val.tx_hash}"
             )
+            self._rec_set(outcome='hedged')
             await self.update_balances()
             return
 
         print(f"❌ DEX swap FAILED: {val.error_type.value} - {val.error_msg}")
 
         if val.error_type == SwapErrorType.FATAL_UNKNOWN_STATUS:
+            self._rec_set(outcome='swap_unknown')
             # Единственный исход, при котором автозакрытие ЗАПРЕЩЕНО: своп мог и пройти.
             await self.send_notification(
                 f"‼️ PAIR: {self.pair}\n"
@@ -111,6 +153,9 @@ class TradeExecutionMixin:
             # Путь отката не имеет права падать молча в общий except _make_trade_impl -
             # именно так позиция и оставалась открытой без единого уведомления.
             print(f"[{self.pair}] _emergency_close_position упал: {e}")
+            self._rec_set(outcome='emergency_partial', emergency_closed_qty=0.0,
+                          emergency_remaining_qty=filled,
+                          notes=f'аварийное закрытие упало: {e}'[:500])
             await self.send_notification(
                 f"‼️ КРИТИЧНО! Закрытие позиции на MEXC упало с ошибкой: {e}\n"
                 f"Пара: {self.pair}\n"
@@ -122,6 +167,9 @@ class TradeExecutionMixin:
             return
 
         returned_pct = (closed / filled * 100) if filled else 0.0
+        self._rec_set(emergency_closed_qty=closed, emergency_remaining_qty=remaining,
+                      outcome=('emergency_closed' if remaining <= filled * MEXC_EMERGENCY_DUST_RATIO
+                               else 'emergency_partial'))
         verb = 'продали' if close_is_sell else 'выкупили'
         report = (f"Аварийное закрытие {self.pair}: {verb} {closed:.8f} из {filled:.8f}\n"
                   f"Возвращено: {returned_pct:.2f}%")
@@ -223,10 +271,58 @@ class TradeExecutionMixin:
             # Сброс состояния текущей сделки для страховки в _make_trade_impl.
             self._mexc_filled = 0.0
             self._hedge_settled = False
+            # Журнальная запись создаётся ДО отправки ордера, чтобы даже сделка,
+            # упавшая на первом же шаге, оставила след. См. arb/core/journal.py.
+            self._trade_record = (TradeRecord(pair=self.pair, trade_type=best.get('type', '?'))
+                                  if TRADE_JOURNAL_ENABLED else None)
+            if self._trade_record is not None:
+                self._trade_record.apply_candidate(best)
             try:
                 await self._make_trade_impl(best, session)
             finally:
                 await self.update_balances()
+                self._flush_trade_record()
+
+    def _flush_trade_record(self):
+        """Дописывает запись в журнал. Вызывается ровно один раз, из finally в
+        make_trade, чтобы строка появилась независимо от исхода сделки.
+        Не имеет права бросить исключение: это finally, и падение здесь затёрло бы
+        собой настоящую причину провала сделки."""
+        rec = self._trade_record
+        self._trade_record = None
+        if rec is None:
+            return
+        try:
+            rec.mark('t_total')
+            if rec.outcome is None:
+                # Сюда попадают пути, которые молча вышли из _make_trade_impl:
+                # place_limit_order вернул не-dict, ответ биржи без 'data' и т.п.
+                rec.outcome = 'unknown'
+            rec.estimate_pnl()
+            self.db.log_trade(rec.to_row())
+        except Exception as e:
+            print(f"[{self.pair}] не удалось записать сделку в журнал: {e}")
+
+    async def _hedge_and_settle(self, best, status, symbol, u_id, session):
+        """Хедж на ФАКТИЧЕСКИ исполненный на MEXC объём + разбор исхода.
+
+        Собрано в один метод, потому что до этого один и тот же вызов был выписан
+        шесть раз (три выхода из цикла ожидания × две стороны сделки), и любая правка
+        - хоть журналирование, хоть смена направления свопа - требовала синхронно
+        поправить все шесть. Направление свопа зависит от стороны сделки:
+          SELL_MEXC: продали токен на MEXC -> выкупаем его в пуле за USDT;
+          BUY_MEXC:  купили токен на MEXC  -> продаём его в пул за USDT.
+        Объём хеджа - всегда status['filled'], а не best['volume']: при частичном
+        исполнении они не совпадают."""
+        filled = float(status['filled'])
+        if best['type'] == 'SELL_MEXC':
+            amount_in = self._hedge_buy_usdt_amount(best, filled)
+            val = await self.pancakce.swap_fast_async(USDT_CONTRACT, self.address, amount_in)
+        else:
+            amount_in = filled
+            val = await self.pancakce.swap_fast_async(self.address, USDT_CONTRACT, amount_in)
+        self._rec_set(swap_amount_in=amount_in)
+        await self.handle_swap(val, status, best, symbol, u_id, session)
 
     async def _make_trade_impl(self, best, session):
         curr_pair = self.pair.split('/')
@@ -239,17 +335,23 @@ class TradeExecutionMixin:
                     # Раньше здесь гасился только self.running - задача monitoring_price
                     # продолжала работать, gather в main.py не возвращался, и пара
                     # оставалась полуживой вместо чистой остановки. См. _stop_pair.
+                    self._rec_set(outcome='mexc_rejected', notes='u_id MEXC устарел')
                     await self._stop_pair('U_id токен MEXC устарел - откройте настройки и укажите новый')
                     return
                 print(f"ОРДЕРД {order}")
                 if order:
                     order_id = order['data']
+                    self._rec_set(mexc_order_id=str(order_id))
+                    self._rec_mark('t_order_placed')
                     tim = time.time()
                     while True:
                         status = await self._fetch_status(order_id)
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] == 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             self._mark_empty_fill(best['type'])
+                            self._rec_mexc_status(status)
+                            self._rec_mark('t_mexc_settled')
+                            self._rec_set(outcome='mexc_empty')
                             return
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
@@ -258,71 +360,95 @@ class TradeExecutionMixin:
                             # той проверкой и cancel_order - хедж должен идти по финальному,
                             # уже замороженному отменой объёму, а не по устаревшему снимку.
                             status = await self._fetch_status(order_id)
+                            self._rec_mexc_status(status)
+                            self._rec_mark('t_mexc_settled')
                             if status['filled'] > 0:
-                                val = await self.pancakce.swap_fast_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
-                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                                await self._hedge_and_settle(best, status, symbol, u_id, session)
                             else:
                                 self._mark_empty_fill(best['type'])
+                                self._rec_set(outcome='mexc_empty')
                             return
                         if status['status'] == 'closed':
                             print(f"STATUS CLOSED: {status}")
                             break
                         if status['status'] == "canceled":
+                            self._rec_mexc_status(status)
+                            self._rec_mark('t_mexc_settled')
                             if status['filled'] > 0:
-                                val = await self.pancakce.swap_fast_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
-                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                                await self._hedge_and_settle(best, status, symbol, u_id, session)
                             else:
                                 self._mark_empty_fill(best['type'])
+                                self._rec_set(outcome='mexc_empty')
                             return
-                        await asyncio.sleep(MEXC_ORDER_POLL_INTERVAL_SECONDS)
-                    val = await self.pancakce.swap_fast_async(USDT_CONTRACT, self.address, self._hedge_buy_usdt_amount(best, status['filled']))
-                    await self.handle_swap(val, status, best, symbol, u_id, session)
+                    self._rec_mexc_status(status)
+                    self._rec_mark('t_mexc_settled')
+                    await self._hedge_and_settle(best, status, symbol, u_id, session)
                     return
+                # Ордер не отправлен и это не протухший u_id: сетевая ошибка
+                # ({"error": ...}) либо отказ биржи (HTTP 200 без 'data' - не хватило
+                # баланса, объём ниже минимального). Раньше такой ответ молча проваливал
+                # `if order:` или падал в KeyError и терялся в общем except ниже.
+                self._rec_set(outcome='mexc_rejected', notes=f'MEXC не принял ордер: {order}')
+                return
             else:
                 order = await place_limit_order(symbol, best["price"], best['volume'], False, u_id, session)
                 if order == False:
                     # См. комментарий в ветке SELL_MEXC выше.
+                    self._rec_set(outcome='mexc_rejected', notes='u_id MEXC устарел')
                     await self._stop_pair('U_id токен MEXC устарел - откройте настройки и укажите новый')
                     return
                 print(f"ОРДЕРД {order}")
                 if order:
                     order_id = order['data']
+                    self._rec_set(mexc_order_id=str(order_id))
+                    self._rec_mark('t_order_placed')
                     tim = time.time()
                     while True:
                         status = await self._fetch_status(order_id)
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] == 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             self._mark_empty_fill(best['type'])
+                            self._rec_mexc_status(status)
+                            self._rec_mark('t_mexc_settled')
+                            self._rec_set(outcome='mexc_empty')
                             return
                         if time.time() - tim >= MEXC_ORDER_FILL_TIMEOUT_SECONDS and status['status'] == 'open' and status['filled'] > 0:
                             await self.exchange.cancel_order(order_id, self.pair)
                             # Перечитываем статус ПОСЛЕ отмены - см. аналогичный комментарий
                             # в ветке SELL_MEXC выше.
                             status = await self._fetch_status(order_id)
+                            self._rec_mexc_status(status)
+                            self._rec_mark('t_mexc_settled')
                             if status['filled'] > 0:
-                                val = await self.pancakce.swap_fast_async(self.address, USDT_CONTRACT, status['filled'])
-                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                                await self._hedge_and_settle(best, status, symbol, u_id, session)
                             else:
                                 self._mark_empty_fill(best['type'])
+                                self._rec_set(outcome='mexc_empty')
                             return
                         if status['status'] == 'closed':
                             print(f"STATUS CLOSED: {status}")
                             break
                         if status['status'] == "canceled":
+                            self._rec_mexc_status(status)
+                            self._rec_mark('t_mexc_settled')
                             if status['filled'] > 0:
-                                val = await self.pancakce.swap_fast_async(self.address, USDT_CONTRACT, status['filled'])
-                                await self.handle_swap(val, status, best, symbol, u_id, session)
+                                await self._hedge_and_settle(best, status, symbol, u_id, session)
                             else:
                                 self._mark_empty_fill(best['type'])
+                                self._rec_set(outcome='mexc_empty')
                             return
-                        await asyncio.sleep(MEXC_ORDER_POLL_INTERVAL_SECONDS)
-                    val = await self.pancakce.swap_fast_async(self.address, USDT_CONTRACT, status['filled'])
-                    await self.handle_swap(val, status, best, symbol, u_id, session)
+                    self._rec_mexc_status(status)
+                    self._rec_mark('t_mexc_settled')
+                    await self._hedge_and_settle(best, status, symbol, u_id, session)
                     return
+                # См. комментарий в ветке SELL_MEXC выше.
+                self._rec_set(outcome='mexc_rejected', notes=f'MEXC не принял ордер: {order}')
+                return
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f'Error in _make_trade_impl: {e}')
+            self._rec_set(outcome='error', notes=str(e)[:500])
             # Страховка последнего рубежа. Раньше здесь был только print, и это делало
             # любой сбой ПОСЛЕ исполнения ноги на MEXC (упавший fetch_order,
             # cancel_order, place_limit_order) молчаливой открытой позицией: до
@@ -342,6 +468,10 @@ class TradeExecutionMixin:
                     close_is_sell = best['type'] == 'BUY_MEXC'
                     closed, remaining, problems = await self._emergency_close_position(
                         symbol, u_id, session, close_is_sell, self._mexc_filled)
+                    self._rec_set(emergency_closed_qty=closed, emergency_remaining_qty=remaining,
+                                  outcome=('emergency_closed'
+                                           if remaining <= self._mexc_filled * MEXC_EMERGENCY_DUST_RATIO
+                                           else 'emergency_partial'))
                     report = (f"Аварийное закрытие {self.pair}: "
                               f"{closed:.8f} из {self._mexc_filled:.8f}")
                     if problems:

@@ -7,7 +7,9 @@
 порядке объявления через общий Dispatcher, и разнос по файлам менял бы порядок
 разрешения хендлеров.
 """
+import html
 import logging
+import time
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -23,6 +25,7 @@ from arb.storage.database import Database
 import asyncio
 from arb.core.runner import main as arb_main
 from arb.core.runner import active_arbitrage_instances
+from arb.core.journal import outcome_label
 from arb.paths import PAIR_ABI_DIR
 from arb.telegram.states import Form
 
@@ -46,7 +49,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
     builder.button(text="🔄 Пары")
     builder.button(text="🚀 Запустить бота")
     builder.button(text="🛑 Остановить бота")
-    builder.adjust(2, 2)
+    builder.button(text="📊 Статистика")
+    builder.adjust(2, 2, 1)
     chat_id = message.chat.id
 
     await message.answer(
@@ -258,6 +262,171 @@ async def individual_spread_set(message: types.Message, state: FSMContext):
         await state.clear()
         await cmd_start(message, state)
 
+
+
+# =====================
+# СТАТИСТИКА (журнал исполнений, arb/core/journal.py)
+# =====================
+# Все агрегаты считаются запросом к таблице trades в момент показа - нигде не
+# хранятся. Причина в Database.get_trade_stats: журнал единственный источник
+# истины, а хранимая сумма разъезжается с ним при падениях и замораживает в себе
+# старую формулу расчёта прибыли.
+
+def _fmt_usd(value) -> str:
+    """Деньги со знаком. Знак важен: минус в отчёте должен бросаться в глаза."""
+    if value is None:
+        return "—"
+    return f"{value:+.4f}$" if value else "0.0000$"
+
+
+def _fmt_ts(ts) -> str:
+    return time.strftime('%d.%m.%Y %H:%M', time.localtime(ts)) if ts else "—"
+
+
+def _fmt_secs(value) -> str:
+    return f"{value:.3f} с" if value else "—"
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение после числительного: 1 сделка, 2 сделки, 5 сделок."""
+    tail = abs(int(n)) % 100
+    if 11 <= tail <= 14:
+        return many
+    tail %= 10
+    if tail == 1:
+        return one
+    if 2 <= tail <= 4:
+        return few
+    return many
+
+
+def _trades_word(n: int) -> str:
+    return f"{n} {_plural(n, 'сделка', 'сделки', 'сделок')}"
+
+
+def _fmt_trade(trade: dict) -> str:
+    """Одна сделка одной строкой - для 'самой прибыльной' и 'самой убыточной'."""
+    if not trade:
+        return "—"
+    return (f"{_fmt_usd(trade.get('realized_pnl_usd'))} · {trade.get('trade_type') or '?'} · "
+            f"объём {trade.get('mexc_filled') or 0:.6f} · {_fmt_ts(trade.get('ts'))}")
+
+
+def _render_pair_stats(stats: dict) -> str:
+    if not stats or not stats.get('trades'):
+        return ("📊 По этой паре сделок ещё не было.\n\n"
+                "Журнал заполняется только когда бот реально торгует: проверьте, что "
+                "<code>test_mode = False</code> в config.py и вызов make_trade в "
+                "analyze_opportunities не закомментирован.")
+
+    lines = [f"📊 <b>{html.escape(str(stats['pair']))}</b>",
+             f"<i>{_fmt_ts(stats['first_ts'])} — {_fmt_ts(stats['last_ts'])}</i>", ""]
+
+    lines += [
+        f"Всего попыток: <b>{stats['trades']}</b>",
+        f"Оборот: {stats['volume_usd']:.2f}$",
+        "",
+        f"💰 <b>Итог: {_fmt_usd(stats['pnl_usd'])}</b>",
+        f"  ├ заработано: {_fmt_usd(stats['profit_usd'])} ({_trades_word(stats['win_trades'])})",
+        f"  └ потеряно: {_fmt_usd(stats['loss_usd'])} ({_trades_word(stats['loss_trades'])})",
+        # Газ ОТДЕЛЬНОЙ строкой, а не веткой разбивки выше: он уже вычтен внутри
+        # прибыли каждой сделки (est_fee_usd в TradeRecord.estimate_pnl включает
+        # стоимость газа). Веткой "├ газ" он читался бы как третье слагаемое итога,
+        # то есть как ещё один вычет поверх - и арифметика в отчёте не сходилась бы.
+        f"⛽ Газ (уже учтён в итоге): {stats['gas_usd']:.4f}$",
+    ]
+    # Сделки с неизвестным итогом в сумму не попали вообще - если их много,
+    # итоговое число ничего не значит, и это надо показать, а не спрятать.
+    if stats['pnl_unknown_trades']:
+        lines.append(f"⚠️ Не учтено в итоге (неизвестный исход): "
+                     f"<b>{_trades_word(stats['pnl_unknown_trades'])}</b>")
+
+    lines += ["", f"🎯 Лучшая: {_fmt_trade(stats.get('best'))}",
+              f"📉 Худшая: {_fmt_trade(stats.get('worst'))}", ""]
+
+    if stats['hedge_success_pct'] is not None:
+        lines.append(f"🔗 Хедж прошёл: <b>{stats['hedge_success_pct']:.1f}%</b> "
+                     f"({stats['hedged']} из {stats['reached_swap']} дошедших до свопа)")
+    lines += [
+        f"⏱ Среднее время сделки: {_fmt_secs(stats['avg_seconds'])}",
+        f"⏱ Среднее время анализа: {_fmt_secs(stats['avg_analysis_seconds'])}",
+        "",
+        "<b>Исходы:</b>",
+    ]
+    for outcome, count in stats['by_outcome'].items():
+        lines.append(f"  {html.escape(outcome_label(outcome))}: {count}")
+    return "\n".join(lines)
+
+
+def _render_overall_stats(stats: dict, by_pair: list) -> str:
+    if not stats or not stats.get('trades'):
+        return ("📊 Сделок в журнале пока нет.\n\n"
+                "Журнал заполняется только когда бот реально торгует: проверьте, что "
+                "<code>test_mode = False</code> в config.py и вызов make_trade в "
+                "analyze_opportunities не закомментирован.")
+
+    lines = [
+        "🌍 <b>Общая статистика</b>",
+        f"<i>{_fmt_ts(stats['first_ts'])} — {_fmt_ts(stats['last_ts'])}</i>",
+        "",
+        f"Всего попыток: <b>{_trades_word(stats['trades'])}</b>",
+        f"💰 <b>Общая прибыль: {_fmt_usd(stats['pnl_usd'])}</b>",
+        f"⛽ Газ (уже учтён в итоге): {stats['gas_usd']:.4f}$",
+    ]
+    if stats['pnl_unknown_trades']:
+        lines.append(f"⚠️ Не учтено в итоге (неизвестный исход): "
+                     f"<b>{_trades_word(stats['pnl_unknown_trades'])}</b>")
+    lines += ["", "<b>По парам:</b>"]
+
+    for item in by_pair:
+        lines.append(
+            f"  {html.escape(item['pair'])}: <b>{_fmt_usd(item['pnl_usd'])}</b> "
+            f"({_trades_word(item['trades'])}, ✅ {item['hedged']})")
+    return "\n".join(lines)
+
+
+def _stats_keyboard(pairs) -> ReplyKeyboardBuilder:
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🌍 Общая статистика")
+    for pair in pairs:
+        builder.button(text=pair)
+    builder.button(text="🔙 Назад")
+    builder.adjust(1, 2)
+    return builder
+
+
+@dp.message(Form.SETTINGS, F.text == "📊 Статистика")
+async def stats_menu(message: types.Message, state: FSMContext):
+    pairs = db.get_all_pairs()
+    await message.answer(
+        "Выберите пару или посмотрите сводку по всем:",
+        reply_markup=_stats_keyboard(pairs).as_markup(resize_keyboard=True)
+    )
+    await state.set_state(Form.STATS_SELECT)
+
+
+@dp.message(Form.STATS_SELECT, F.text == "🔙 Назад")
+async def stats_back(message: types.Message, state: FSMContext):
+    await cmd_start(message, state)
+
+
+@dp.message(Form.STATS_SELECT, F.text == "🌍 Общая статистика")
+async def stats_overall(message: types.Message, state: FSMContext):
+    await message.answer(
+        _render_overall_stats(db.get_trade_stats(), db.get_profit_by_pair()),
+        parse_mode="HTML"
+    )
+
+
+@dp.message(Form.STATS_SELECT)
+async def stats_for_pair(message: types.Message, state: FSMContext):
+    pair = message.text.upper()
+    if pair not in db.get_all_pairs():
+        await message.answer("❌ Пара не найдена! Выберите из списка:")
+        return
+    # Меню намеренно НЕ закрывается: после отчёта пользователь обычно смотрит
+    # следующую пару, и возврат в главное меню каждый раз только мешает.
+    await message.answer(_render_pair_stats(db.get_trade_stats(pair)), parse_mode="HTML")
 
 
 # =====================
